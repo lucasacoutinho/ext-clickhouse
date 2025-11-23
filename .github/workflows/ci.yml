@@ -1,0 +1,174 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['8.1', '8.2', '8.3', '8.4', '8.5']
+        clickhouse-version: ['latest', '23.8']
+
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:${{ matrix.clickhouse-version }}
+        ports:
+          - 9000:9000
+          - 8123:8123
+        options: >-
+          --health-cmd "clickhouse-client --query 'SELECT 1'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP ${{ matrix.php-version }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          extensions: sockets
+          tools: phpize
+          coverage: none
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            build-essential \
+            liblz4-dev \
+            libzstd-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Build with CMake
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. \
+            -DWITH_LZ4=ON \
+            -DWITH_ZSTD=ON \
+            -DWITH_SSL=ON
+          make -j$(nproc)
+
+      - name: Verify extension loads
+        run: |
+          php -d extension=build/clickhouse.so -m | grep clickhouse
+          php -d extension=build/clickhouse.so -r "echo 'Extension loaded successfully\n';"
+
+      - name: Wait for ClickHouse
+        run: |
+          for i in {1..30}; do
+            if curl -s http://localhost:8123/ping; then
+              echo "ClickHouse is ready"
+              break
+            fi
+            echo "Waiting for ClickHouse..."
+            sleep 2
+          done
+
+      - name: Run tests
+        env:
+          CLICKHOUSE_HOST: localhost
+          CLICKHOUSE_PORT: 9000
+        run: |
+          php -d extension=build/clickhouse.so run-tests.php tests/
+
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: sockets
+          tools: phpize
+          coverage: none
+
+      - name: Install dependencies
+        run: |
+          brew install cmake lz4 zstd openssl pkg-config
+
+      - name: Build with CMake
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. \
+            -DWITH_LZ4=ON \
+            -DWITH_ZSTD=ON \
+            -DWITH_SSL=ON \
+            -DOPENSSL_ROOT_DIR=$(brew --prefix openssl)
+          make -j$(sysctl -n hw.ncpu)
+
+      - name: Verify extension loads
+        run: |
+          php -d extension=build/clickhouse.so -m | grep clickhouse
+
+  build-phpize:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        php-version: ['8.1', '8.2', '8.3', '8.4', '8.5']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP ${{ matrix.php-version }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          extensions: sockets
+          tools: phpize
+          coverage: none
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            liblz4-dev \
+            libzstd-dev \
+            libssl-dev
+
+      - name: Build with phpize (legacy)
+        run: |
+          phpize
+          ./configure --with-lz4 --with-zstd --with-openssl
+          make -j$(nproc)
+
+      - name: Verify extension loads
+        run: |
+          php -d extension=modules/clickhouse.so -m | grep clickhouse
+
+  static-analysis:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: sudo apt-get install -y cppcheck
+
+      - name: Run cppcheck
+        run: |
+          cppcheck --enable=warning,style,performance \
+            --suppress=unusedFunction \
+            --suppress=missingIncludeSystem \
+            --error-exitcode=0 \
+            src/ clickhouse.c
