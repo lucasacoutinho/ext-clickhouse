@@ -4,6 +4,10 @@
   +----------------------------------------------------------------------+
 */
 
+/* Enable POSIX and GNU extensions for strdup, gethostname, etc. */
+#define _GNU_SOURCE
+#define _POSIX_C_SOURCE 200809L
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -89,7 +93,7 @@ void clickhouse_client_info_free(clickhouse_client_info *info) {
     }
 }
 
-int clickhouse_client_info_write(clickhouse_buffer *buf, clickhouse_client_info *info, uint64_t server_revision) {
+int clickhouse_client_info_write(clickhouse_buffer *buf, const clickhouse_client_info *info, uint64_t server_revision) {
     /* Query kind */
     if (clickhouse_buffer_write_uint8(buf, info->query_kind) != 0) return -1;
 

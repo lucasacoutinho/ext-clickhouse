@@ -142,6 +142,7 @@ static uint64_t hash_len_33_to_64(const char *s, size_t len) {
     return shift_mix(r * k0 + vs) * k2;
 }
 
+__attribute__((unused))
 static uint64_t city_hash_64(const char *s, size_t len) {
     if (len <= 32) {
         if (len <= 16) {

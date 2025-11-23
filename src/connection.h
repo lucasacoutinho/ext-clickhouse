@@ -67,7 +67,7 @@ int clickhouse_connection_receive(clickhouse_connection *conn);
 int clickhouse_connection_read_packet_type(clickhouse_connection *conn, uint64_t *packet_type);
 
 /* Error handling */
-const char *clickhouse_connection_get_error(clickhouse_connection *conn);
+const char *clickhouse_connection_get_error(const clickhouse_connection *conn);
 void clickhouse_connection_set_error(clickhouse_connection *conn, const char *error);
 
 /* Timeout settings */

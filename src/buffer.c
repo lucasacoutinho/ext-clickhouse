@@ -309,10 +309,10 @@ int clickhouse_buffer_read_bytes(clickhouse_buffer *buf, uint8_t *data, size_t l
     return 0;
 }
 
-size_t clickhouse_buffer_remaining(clickhouse_buffer *buf) {
+size_t clickhouse_buffer_remaining(const clickhouse_buffer *buf) {
     return buf->size - buf->position;
 }
 
-bool clickhouse_buffer_eof(clickhouse_buffer *buf) {
+bool clickhouse_buffer_eof(const clickhouse_buffer *buf) {
     return buf->position >= buf->size;
 }

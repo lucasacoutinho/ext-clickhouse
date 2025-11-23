@@ -158,7 +158,7 @@ typedef struct {
 /* Client info functions */
 clickhouse_client_info *clickhouse_client_info_create(void);
 void clickhouse_client_info_free(clickhouse_client_info *info);
-int clickhouse_client_info_write(clickhouse_buffer *buf, clickhouse_client_info *info, uint64_t server_revision);
+int clickhouse_client_info_write(clickhouse_buffer *buf, const clickhouse_client_info *info, uint64_t server_revision);
 
 /* Server info functions */
 clickhouse_server_info *clickhouse_server_info_create(void);

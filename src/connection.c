@@ -4,11 +4,16 @@
   +----------------------------------------------------------------------+
 */
 
+/* Enable POSIX and GNU extensions for strdup, getaddrinfo, etc. */
+#define _GNU_SOURCE
+#define _POSIX_C_SOURCE 200809L
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
 #include "connection.h"
+#include <netdb.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -228,7 +233,6 @@ static int clickhouse_ssl_setup(clickhouse_connection *conn) {
     /* Perform SSL handshake */
     int result = SSL_connect(ssl);
     if (result != 1) {
-        int err = SSL_get_error(ssl, result);
         char err_buf[256];
         ERR_error_string_n(ERR_get_error(), err_buf, sizeof(err_buf));
         clickhouse_connection_set_error(conn, err_buf);
@@ -642,7 +646,7 @@ int clickhouse_connection_read_packet_type(clickhouse_connection *conn, uint64_t
     return clickhouse_buffer_read_varint(conn->read_buf, packet_type);
 }
 
-const char *clickhouse_connection_get_error(clickhouse_connection *conn) {
+const char *clickhouse_connection_get_error(const clickhouse_connection *conn) {
     return conn->last_error;
 }
 
@@ -726,31 +730,6 @@ int clickhouse_result_add_block(clickhouse_result *result, clickhouse_block *blo
     return 0;
 }
 
-/* Receive more data if needed */
-static int connection_receive_more(clickhouse_connection *conn) {
-    uint8_t temp_buf[READ_BUFFER_SIZE];
-    ssize_t received = recv(conn->socket_fd, temp_buf, sizeof(temp_buf), 0);
-
-    if (received < 0) {
-        if (errno == EINTR) {
-            return connection_receive_more(conn);
-        }
-        clickhouse_connection_set_error(conn, strerror(errno));
-        return -1;
-    }
-
-    if (received == 0) {
-        clickhouse_connection_set_error(conn, "Connection closed by server");
-        return -1;
-    }
-
-    if (clickhouse_buffer_write_bytes(conn->read_buf, temp_buf, received) != 0) {
-        clickhouse_connection_set_error(conn, "Buffer overflow");
-        return -1;
-    }
-
-    return 0;
-}
 
 /* Send empty data block (signals end of data) */
 int clickhouse_connection_send_empty_block(clickhouse_connection *conn) {

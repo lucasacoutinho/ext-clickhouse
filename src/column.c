@@ -4,6 +4,10 @@
   +----------------------------------------------------------------------+
 */
 
+/* Enable POSIX and GNU extensions for strdup, strndup, etc. */
+#define _GNU_SOURCE
+#define _POSIX_C_SOURCE 200809L
+
 #include "column.h"
 #include <stdlib.h>
 #include <string.h>
@@ -311,7 +315,7 @@ clickhouse_type_info *clickhouse_type_parse(const char *type_str) {
                          * Named elements have format: identifier followed by space and then type.
                          * The type always starts with uppercase or is a parametric type.
                          * We need to find the first space at depth 0 and check if what follows is a type. */
-                        char *type_str_to_parse = elem_str;
+                        const char *type_str_to_parse = elem_str;
                         char *space = NULL;
 
                         /* Find first space at depth 0 (not inside parentheses) */
@@ -719,7 +723,7 @@ int clickhouse_column_read(clickhouse_buffer *buf, clickhouse_column *col, size_
         if (!col->offsets) return -1;
 
         for (size_t i = 0; i < row_count; i++) {
-            if (clickhouse_buffer_read_bytes(buf, &col->offsets[i], sizeof(uint64_t)) != 0) {
+            if (clickhouse_buffer_read_uint64(buf, &col->offsets[i]) != 0) {
                 return -1;
             }
         }
@@ -788,7 +792,7 @@ int clickhouse_column_read(clickhouse_buffer *buf, clickhouse_column *col, size_
         if (!col->offsets) return -1;
 
         for (size_t i = 0; i < row_count; i++) {
-            if (clickhouse_buffer_read_bytes(buf, &col->offsets[i], sizeof(uint64_t)) != 0) {
+            if (clickhouse_buffer_read_uint64(buf, &col->offsets[i]) != 0) {
                 return -1;
             }
         }
@@ -947,7 +951,7 @@ int clickhouse_column_write(clickhouse_buffer *buf, clickhouse_column *col) {
     if (clickhouse_buffer_write_string(buf, col->type->type_name, strlen(col->type->type_name)) != 0) return -1;
 
     size_t elem_size = clickhouse_type_size(col->type);
-    clickhouse_type_info *data_type = col->type;
+    const clickhouse_type_info *data_type = col->type;
 
     /* Handle Nullable */
     if (col->type->type_id == CH_TYPE_NULLABLE && col->nulls) {

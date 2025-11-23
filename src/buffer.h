@@ -59,7 +59,7 @@ int clickhouse_buffer_read_string(clickhouse_buffer *buf, char **str, size_t *le
 int clickhouse_buffer_read_bytes(clickhouse_buffer *buf, uint8_t *data, size_t len);
 
 /* Buffer state */
-size_t clickhouse_buffer_remaining(clickhouse_buffer *buf);
-bool clickhouse_buffer_eof(clickhouse_buffer *buf);
+size_t clickhouse_buffer_remaining(const clickhouse_buffer *buf);
+bool clickhouse_buffer_eof(const clickhouse_buffer *buf);
 
 #endif /* CLICKHOUSE_BUFFER_H */
