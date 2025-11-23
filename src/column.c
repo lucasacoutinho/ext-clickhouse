@@ -5,8 +5,12 @@
 */
 
 /* Enable POSIX and GNU extensions for strdup, strndup, etc. */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
+#ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#endif
 
 #include "column.h"
 #include <stdlib.h>
@@ -701,7 +705,7 @@ int clickhouse_column_read(clickhouse_buffer *buf, clickhouse_column *col, size_
 
         /* Read number_of_rows */
         uint64_t number_of_rows;
-        if (clickhouse_buffer_read_bytes(buf, (uint8_t *)&number_of_rows, sizeof(uint64_t)) != 0) return -1;
+        if (clickhouse_buffer_read_uint64(buf, &number_of_rows) != 0) return -1;
 
         /* Read indices */
         col->offsets = malloc(row_count * sizeof(uint64_t));
@@ -709,7 +713,31 @@ int clickhouse_column_read(clickhouse_buffer *buf, clickhouse_column *col, size_
 
         for (size_t i = 0; i < row_count; i++) {
             uint64_t idx = 0;
-            if (clickhouse_buffer_read_bytes(buf, (uint8_t *)&idx, key_size) != 0) return -1;
+            int read_result = -1;
+            switch (key_size) {
+                case 1: {
+                    uint8_t val;
+                    read_result = clickhouse_buffer_read_uint8(buf, &val);
+                    idx = val;
+                    break;
+                }
+                case 2: {
+                    uint16_t val;
+                    read_result = clickhouse_buffer_read_uint16(buf, &val);
+                    idx = val;
+                    break;
+                }
+                case 4: {
+                    uint32_t val;
+                    read_result = clickhouse_buffer_read_uint32(buf, &val);
+                    idx = val;
+                    break;
+                }
+                case 8:
+                    read_result = clickhouse_buffer_read_uint64(buf, &idx);
+                    break;
+            }
+            if (read_result != 0) return -1;
             col->offsets[i] = idx;
         }
 
@@ -865,7 +893,7 @@ int clickhouse_column_read(clickhouse_buffer *buf, clickhouse_column *col, size_
         if (!col->offsets) return -1;
 
         for (size_t i = 0; i < row_count; i++) {
-            if (clickhouse_buffer_read_bytes(buf, (uint8_t *)&col->offsets[i], sizeof(uint64_t)) != 0) {
+            if (clickhouse_buffer_read_uint64(buf, &col->offsets[i]) != 0) {
                 return -1;
             }
         }

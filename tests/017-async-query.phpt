@@ -32,17 +32,18 @@ var_dump($result[0]['str'] === 'hello');
 $cached = $async->getResult();
 var_dump($cached === $result);
 
-// Test 6: Multiple concurrent async queries
+// Test 6: Sequential async queries (each must complete before next starts)
+// Note: True concurrent queries require separate connections
 $async1 = $client->queryAsync("SELECT 10 as a");
-$async2 = $client->queryAsync("SELECT 20 as b");
-$async3 = $client->queryAsync("SELECT 30 as c");
-
 $r1 = $async1->wait();
-$r2 = $async2->wait();
-$r3 = $async3->wait();
-
 var_dump($r1[0]['a'] === 10);
+
+$async2 = $client->queryAsync("SELECT 20 as b");
+$r2 = $async2->wait();
 var_dump($r2[0]['b'] === 20);
+
+$async3 = $client->queryAsync("SELECT 30 as c");
+$r3 = $async3->wait();
 var_dump($r3[0]['c'] === 30);
 
 echo "OK\n";

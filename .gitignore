@@ -1,0 +1,77 @@
+# Build artifacts
+*.o
+*.lo
+*.la
+*.so
+*.dylib
+*.a
+*.dep
+.libs/
+modules/
+
+# CMake
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# Autotools/phpize generated files
+configure
+configure~
+config.h
+config.h.in
+config.h.in~
+config.log
+config.status
+config.nice
+config.nice~
+acinclude.m4
+aclocal.m4
+autom4te.cache/
+install-sh
+ltmain.sh
+missing
+mkinstalldirs
+
+# Makefiles (generated)
+Makefile
+Makefile.fragments
+Makefile.global
+Makefile.objects
+
+# phpize output
+run-tests.php
+libtool
+
+# Test output
+tests/*.log
+tests/*.out
+tests/*.diff
+tests/*.exp
+tests/*.sh
+tests/*.mem
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Coverage
+coverage/
+*.gcda
+*.gcno
+*.gcov
+
+# Temporary files
+*.tmp
+*.bak
+*.orig

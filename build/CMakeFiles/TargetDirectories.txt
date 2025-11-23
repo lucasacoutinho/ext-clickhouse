@@ -1,8 +1,0 @@
-/workspace/ext/clickhouse/build/CMakeFiles/clickhouse.dir
-/workspace/ext/clickhouse/build/CMakeFiles/test.dir
-/workspace/ext/clickhouse/build/CMakeFiles/edit_cache.dir
-/workspace/ext/clickhouse/build/CMakeFiles/rebuild_cache.dir
-/workspace/ext/clickhouse/build/CMakeFiles/list_install_components.dir
-/workspace/ext/clickhouse/build/CMakeFiles/install.dir
-/workspace/ext/clickhouse/build/CMakeFiles/install/local.dir
-/workspace/ext/clickhouse/build/CMakeFiles/install/strip.dir

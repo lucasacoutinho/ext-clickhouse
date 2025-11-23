@@ -68,6 +68,13 @@ set_target_properties(clickhouse PROPERTIES
     SUFFIX ".so"
 )
 
+# macOS-specific linker flags to allow undefined PHP symbols
+if(APPLE)
+    set_target_properties(clickhouse PROPERTIES
+        LINK_FLAGS "-undefined dynamic_lookup"
+    )
+endif()
+
 # Include directories
 target_include_directories(clickhouse PRIVATE
     ${PHP_INCLUDE_DIRS}
@@ -91,9 +98,10 @@ if(WITH_LZ4)
 
     if(LZ4_FOUND)
         target_include_directories(clickhouse PRIVATE ${LZ4_INCLUDE_DIRS})
+        target_link_directories(clickhouse PRIVATE ${LZ4_LIBRARY_DIRS})
         target_link_libraries(clickhouse ${LZ4_LIBRARIES})
         target_compile_definitions(clickhouse PRIVATE HAVE_LZ4)
-        message(STATUS "LZ4 support: enabled")
+        message(STATUS "LZ4 support: enabled (${LZ4_LIBRARY_DIRS})")
     else()
         find_library(LZ4_LIBRARY NAMES lz4)
         find_path(LZ4_INCLUDE_DIR NAMES lz4.h)
@@ -117,9 +125,10 @@ if(WITH_ZSTD)
 
     if(ZSTD_FOUND)
         target_include_directories(clickhouse PRIVATE ${ZSTD_INCLUDE_DIRS})
+        target_link_directories(clickhouse PRIVATE ${ZSTD_LIBRARY_DIRS})
         target_link_libraries(clickhouse ${ZSTD_LIBRARIES})
         target_compile_definitions(clickhouse PRIVATE HAVE_ZSTD)
-        message(STATUS "ZSTD support: enabled")
+        message(STATUS "ZSTD support: enabled (${ZSTD_LIBRARY_DIRS})")
     else()
         find_library(ZSTD_LIBRARY NAMES zstd)
         find_path(ZSTD_INCLUDE_DIR NAMES zstd.h)

@@ -22,6 +22,12 @@ jobs:
         ports:
           - 9000:9000
           - 8123:8123
+        env:
+          CLICKHOUSE_DB: default
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: ""
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+          CLICKHOUSE_SKIP_USER_SETUP: 1
         options: >-
           --health-cmd "clickhouse-client --query 'SELECT 1'"
           --health-interval 10s
@@ -53,6 +59,7 @@ jobs:
 
       - name: Build with CMake
         run: |
+          rm -rf build
           mkdir -p build
           cd build
           cmake .. \
@@ -68,21 +75,48 @@ jobs:
 
       - name: Wait for ClickHouse
         run: |
+          echo "Waiting for ClickHouse HTTP port (8123)..."
           for i in {1..30}; do
             if curl -s http://localhost:8123/ping; then
-              echo "ClickHouse is ready"
+              echo "ClickHouse HTTP is ready"
               break
             fi
             echo "Waiting for ClickHouse..."
             sleep 2
           done
+          echo "Waiting for ClickHouse native port (9000)..."
+          for i in {1..30}; do
+            if nc -z localhost 9000 2>/dev/null; then
+              echo "ClickHouse native port is ready"
+              break
+            fi
+            echo "Waiting for native port..."
+            sleep 2
+          done
+          # Verify extension can connect
+          php -d extension=build/clickhouse.so -r "
+            \$c = new ClickHouse\Client('localhost', 9000);
+            if (\$c->ping()) {
+              echo \"Extension connected successfully\n\";
+            } else {
+              echo \"Extension connection failed\n\";
+              exit(1);
+            }
+          "
+
+      - name: Download run-tests.php
+        run: |
+          curl -sSL https://raw.githubusercontent.com/php/php-src/master/run-tests.php -o run-tests.php
 
       - name: Run tests
         env:
-          CLICKHOUSE_HOST: localhost
-          CLICKHOUSE_PORT: 9000
+          NO_INTERACTION: 1
         run: |
-          php -d extension=build/clickhouse.so run-tests.php tests/
+          printf '#!/bin/bash\nexport CLICKHOUSE_HOST=localhost\nexport CLICKHOUSE_PORT=9000\nexec php -d extension=build/clickhouse.so "$@"\n' > php-bin
+          chmod +x php-bin
+          cat php-bin
+          export TEST_PHP_EXECUTABLE=$(pwd)/php-bin
+          php run-tests.php -p ./php-bin tests/
 
   build-macos:
     runs-on: macos-latest
@@ -105,6 +139,7 @@ jobs:
 
       - name: Build with CMake
         run: |
+          rm -rf build
           mkdir -p build
           cd build
           cmake .. \
