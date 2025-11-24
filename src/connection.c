@@ -987,6 +987,37 @@ int clickhouse_connection_send_external_tables(clickhouse_connection *conn, clic
     return 0;
 }
 
+/* Insert raw formatted data (CSV, TSV, JSONEachRow, etc.) */
+int clickhouse_connection_insert_format_data(clickhouse_connection *conn, const char *table,
+                                              const char *format, const void *data, size_t data_len) {
+    if (!conn || !table || !format || !data || data_len == 0) return -1;
+
+    /* Build the INSERT query with FORMAT clause and append data */
+    size_t query_prefix_len = strlen("INSERT INTO  FORMAT \n") + strlen(table) + strlen(format);
+    size_t total_len = query_prefix_len + data_len + 1;
+    char *query = malloc(total_len);
+    if (!query) {
+        clickhouse_connection_set_error(conn, "Failed to allocate query buffer");
+        return -1;
+    }
+
+    /* Build query: INSERT INTO table FORMAT format\n<data> */
+    int prefix_len = snprintf(query, total_len, "INSERT INTO %s FORMAT %s\n", table, format);
+    memcpy(query + prefix_len, data, data_len);
+    query[prefix_len + data_len] = '\0';
+
+    /* Execute the query using the standard query execution */
+    clickhouse_result *result = NULL;
+    int status = clickhouse_connection_execute_query(conn, query, &result);
+    free(query);
+
+    if (result) {
+        clickhouse_result_free(result);
+    }
+
+    return status;
+}
+
 /* Query options management */
 
 clickhouse_query_options *clickhouse_query_options_create(void) {
@@ -1272,14 +1303,26 @@ static int connection_execute_query_internal(clickhouse_connection *conn, const 
                     break;
                 }
 
+                case CH_SERVER_LOG: {
+                    /* Read and handle log entry */
+                    clickhouse_log_entry *log_entry = clickhouse_log_entry_read(conn->read_buf);
+                    if (log_entry) {
+                        /* Call log callback if provided */
+                        if (options && options->log_callback) {
+                            options->log_callback(log_entry, options->log_user_data);
+                        }
+                        clickhouse_log_entry_free(log_entry);
+                    }
+                    break;
+                }
+
                 case CH_SERVER_END_OF_STREAM: {
                     done = 1;
                     break;
                 }
 
-                case CH_SERVER_LOG:
                 case CH_SERVER_TABLE_COLUMNS: {
-                    /* Skip these by reading and discarding the table name and block */
+                    /* Skip by reading and discarding the table name and block */
                     char *dummy;
                     size_t dummy_len;
                     if (clickhouse_buffer_read_string(conn->read_buf, &dummy, &dummy_len) == 0) {
@@ -1631,4 +1674,428 @@ int clickhouse_async_poll(clickhouse_connection *conn, clickhouse_async_query *a
 
     async->state = ASYNC_STATE_WAITING;
     return 0;
+}
+
+/* Create streaming query handle */
+clickhouse_streaming_query *clickhouse_streaming_query_create(void) {
+    clickhouse_streaming_query *sq = calloc(1, sizeof(clickhouse_streaming_query));
+    if (!sq) return NULL;
+
+    sq->state = STREAM_STATE_INIT;
+    sq->current_block = NULL;
+    sq->current_row = 0;
+    sq->done = 0;
+    sq->first_receive = 1;
+    sq->totals = NULL;
+    sq->extremes = NULL;
+    sq->exception = NULL;
+    sq->error = NULL;
+    sq->options = NULL;
+    sq->query_id = NULL;
+
+    return sq;
+}
+
+/* Free streaming query handle */
+void clickhouse_streaming_query_free(clickhouse_streaming_query *sq) {
+    if (!sq) return;
+
+    /* If query is not done, drain remaining packets to prevent state leakage */
+    if (!sq->done && sq->conn && sq->state != STREAM_STATE_ERROR) {
+        /* Drain up to 1000 blocks - should be enough for most cases */
+        int max_iterations = 1000;
+        int iterations = 0;
+
+        while (!sq->done && iterations < max_iterations) {
+            int result = clickhouse_streaming_fetch_next_block(sq);
+            if (result <= 0) {
+                /* Done or error */
+                break;
+            }
+            /* Free the block immediately to avoid memory bloat */
+            if (sq->current_block) {
+                clickhouse_block_free(sq->current_block);
+                sq->current_block = NULL;
+            }
+            iterations++;
+        }
+
+        /* If we couldn't drain everything, clear the buffer as fallback */
+        if (!sq->done && sq->conn && sq->conn->read_buf) {
+            sq->conn->read_buf->position = sq->conn->read_buf->size;
+        }
+    }
+
+    if (sq->current_block) {
+        clickhouse_block_free(sq->current_block);
+    }
+    if (sq->totals) {
+        clickhouse_block_free(sq->totals);
+    }
+    if (sq->extremes) {
+        clickhouse_block_free(sq->extremes);
+    }
+    if (sq->exception) {
+        clickhouse_exception_free(sq->exception);
+    }
+    if (sq->error) {
+        free(sq->error);
+    }
+    if (sq->query_id) {
+        free(sq->query_id);
+    }
+    /* Note: options is owned by caller, don't free */
+    free(sq);
+}
+
+/* Initialize and start streaming query */
+int clickhouse_connection_query_streaming(clickhouse_connection *conn, const char *query,
+                                          clickhouse_query_options *options,
+                                          clickhouse_streaming_query **sq_out) {
+    if (conn->state != CONN_STATE_AUTHENTICATED) {
+        clickhouse_connection_set_error(conn, "Not connected");
+        return -1;
+    }
+
+    /* Create streaming query handle */
+    clickhouse_streaming_query *sq = clickhouse_streaming_query_create();
+    if (!sq) {
+        clickhouse_connection_set_error(conn, "Failed to create streaming query handle");
+        return -1;
+    }
+
+    sq->conn = conn;
+    sq->options = options;
+
+    /* Create client info */
+    clickhouse_client_info *client_info = clickhouse_client_info_create();
+    if (!client_info) {
+        clickhouse_connection_set_error(conn, "Failed to create client info");
+        clickhouse_streaming_query_free(sq);
+        return -1;
+    }
+
+    /* Determine query settings */
+    uint8_t stage = options ? options->stage : CH_STAGE_COMPLETE;
+    uint8_t compression = options ? options->compression : CH_COMPRESS_NONE;
+
+    /* Store compression method in connection */
+    conn->compression = compression;
+
+    /* Build query packet */
+    clickhouse_buffer_reset(conn->write_buf);
+
+    int write_result;
+    uint64_t server_rev = conn->server_info ? conn->server_info->revision : CLICKHOUSE_REVISION;
+    uint64_t protocol_revision = (server_rev < CLICKHOUSE_REVISION) ? server_rev : CLICKHOUSE_REVISION;
+
+    /* Get or generate query_id */
+    const char *query_id = (options && options->query_id) ? options->query_id : NULL;
+    char *generated_query_id = NULL;
+    if (!query_id || !*query_id) {
+        generated_query_id = generate_query_id();
+        query_id = generated_query_id ? generated_query_id : "";
+    }
+
+    /* Store query_id in streaming query */
+    if (query_id && *query_id) {
+        sq->query_id = strdup(query_id);
+    }
+
+    if (options && (options->settings || options->params)) {
+        write_result = clickhouse_write_query_ext(conn->write_buf, query_id, client_info, query,
+                                                   options->settings, options->params,
+                                                   stage, compression, protocol_revision);
+    } else {
+        write_result = clickhouse_write_query(conn->write_buf, query_id, client_info, query,
+                                              stage, compression, protocol_revision);
+    }
+
+    if (write_result != 0) {
+        clickhouse_client_info_free(client_info);
+        clickhouse_connection_set_error(conn, "Failed to build query packet");
+        if (generated_query_id) free(generated_query_id);
+        clickhouse_streaming_query_free(sq);
+        return -1;
+    }
+    clickhouse_client_info_free(client_info);
+
+    /* Send query */
+    if (clickhouse_connection_send(conn) != 0) {
+        if (generated_query_id) free(generated_query_id);
+        clickhouse_streaming_query_free(sq);
+        return -1;
+    }
+
+    if (generated_query_id) free(generated_query_id);
+
+    /* Send external tables if provided */
+    if (options && options->external_tables) {
+        if (clickhouse_connection_send_external_tables(conn, options->external_tables) != 0) {
+            clickhouse_streaming_query_free(sq);
+            return -1;
+        }
+    }
+
+    /* Send empty data block */
+    if (clickhouse_connection_send_empty_block(conn) != 0) {
+        clickhouse_streaming_query_free(sq);
+        return -1;
+    }
+
+    sq->state = STREAM_STATE_SENT;
+    *sq_out = sq;
+    return 0;
+}
+
+/* Fetch next block from server - returns 1 if block available, 0 if done, -1 on error */
+int clickhouse_streaming_fetch_next_block(clickhouse_streaming_query *sq) {
+    if (!sq || !sq->conn) return -1;
+
+    clickhouse_connection *conn = sq->conn;
+    uint8_t compression = sq->options ? sq->options->compression : CH_COMPRESS_NONE;
+
+    /* If already done or error, return immediately */
+    if (sq->done || sq->state == STREAM_STATE_COMPLETE || sq->state == STREAM_STATE_ERROR) {
+        return 0;
+    }
+
+    /* Free previous current_block if any */
+    if (sq->current_block) {
+        clickhouse_block_free(sq->current_block);
+        sq->current_block = NULL;
+    }
+    sq->current_row = 0;
+
+    sq->state = STREAM_STATE_RECEIVING;
+
+    /* Receive data only if buffer is empty - avoids unnecessary socket reads and timeouts */
+    if (clickhouse_buffer_remaining(conn->read_buf) == 0) {
+        if (sq->first_receive) {
+            if (clickhouse_connection_receive(conn) != 0) {
+                sq->state = STREAM_STATE_ERROR;
+                sq->error = strdup("Failed to receive data");
+                return -1;
+            }
+            sq->first_receive = 0;
+        } else {
+            if (clickhouse_connection_receive_more(conn) != 0) {
+                sq->state = STREAM_STATE_ERROR;
+                sq->error = strdup("Failed to receive more data");
+                return -1;
+            }
+        }
+    }
+
+    /* Process packets until we get a data block or end */
+    while (clickhouse_buffer_remaining(conn->read_buf) > 0) {
+        size_t saved_pos = conn->read_buf->position;
+        uint64_t packet_type;
+
+        if (clickhouse_buffer_read_varint(conn->read_buf, &packet_type) != 0) {
+            conn->read_buf->position = saved_pos;
+            /* Need more data - receive more before recursing */
+            if (sq->done) {
+                sq->state = STREAM_STATE_COMPLETE;
+                return 0;
+            }
+            /* Explicitly receive more data for incomplete packet */
+            if (clickhouse_connection_receive_more(conn) != 0) {
+                sq->state = STREAM_STATE_ERROR;
+                sq->error = strdup("Failed to receive more data for packet header");
+                return -1;
+            }
+            sq->first_receive = 0;
+            return clickhouse_streaming_fetch_next_block(sq);
+        }
+
+        switch (packet_type) {
+            case CH_SERVER_DATA:
+            case CH_SERVER_TOTALS:
+            case CH_SERVER_EXTREMES: {
+                /* Read table name */
+                char *table_name;
+                size_t table_name_len;
+                if (clickhouse_buffer_read_string(conn->read_buf, &table_name, &table_name_len) != 0) {
+                    conn->read_buf->position = saved_pos;
+                    /* Need more data */
+                    if (sq->done) {
+                        sq->state = STREAM_STATE_COMPLETE;
+                        return 0;
+                    }
+                    /* Explicitly receive more data for incomplete table name */
+                    if (clickhouse_connection_receive_more(conn) != 0) {
+                        sq->state = STREAM_STATE_ERROR;
+                        sq->error = strdup("Failed to receive more data for table name");
+                        return -1;
+                    }
+                    sq->first_receive = 0;
+                    return clickhouse_streaming_fetch_next_block(sq);
+                }
+                free(table_name);
+
+                /* Read block */
+                clickhouse_block *block = clickhouse_block_create();
+                if (!block) {
+                    sq->state = STREAM_STATE_ERROR;
+                    sq->error = strdup("Failed to create block");
+                    return -1;
+                }
+
+                /* Handle compression */
+                if (compression != CH_COMPRESS_NONE && clickhouse_is_compressed_block(conn->read_buf)) {
+                    clickhouse_buffer *decompressed_buf = NULL;
+                    int decomp_result = clickhouse_read_compressed_block(conn->read_buf, &decompressed_buf);
+                    if (decomp_result == -2) {
+                        /* Need more data */
+                        clickhouse_block_free(block);
+                        conn->read_buf->position = saved_pos;
+                        if (sq->done) {
+                            sq->state = STREAM_STATE_COMPLETE;
+                            return 0;
+                        }
+                        /* Explicitly receive more data for compressed block */
+                        if (clickhouse_connection_receive_more(conn) != 0) {
+                            sq->state = STREAM_STATE_ERROR;
+                            sq->error = strdup("Failed to receive more data for compressed block");
+                            return -1;
+                        }
+                        sq->first_receive = 0;
+                        return clickhouse_streaming_fetch_next_block(sq);
+                    } else if (decomp_result != 0 || !decompressed_buf) {
+                        clickhouse_block_free(block);
+                        sq->state = STREAM_STATE_ERROR;
+                        sq->error = strdup("Failed to decompress block");
+                        return -1;
+                    }
+
+                    if (clickhouse_block_read(decompressed_buf, block) != 0) {
+                        clickhouse_buffer_free(decompressed_buf);
+                        clickhouse_block_free(block);
+                        sq->state = STREAM_STATE_ERROR;
+                        sq->error = strdup("Failed to parse decompressed block");
+                        return -1;
+                    }
+                    clickhouse_buffer_free(decompressed_buf);
+                } else {
+                    /* No compression */
+                    if (clickhouse_block_read(conn->read_buf, block) != 0) {
+                        clickhouse_block_free(block);
+                        conn->read_buf->position = saved_pos;
+                        /* Need more data */
+                        if (sq->done) {
+                            sq->state = STREAM_STATE_COMPLETE;
+                            return 0;
+                        }
+                        /* Explicitly receive more data for block */
+                        if (clickhouse_connection_receive_more(conn) != 0) {
+                            sq->state = STREAM_STATE_ERROR;
+                            sq->error = strdup("Failed to receive more data for block");
+                            return -1;
+                        }
+                        sq->first_receive = 0;
+                        return clickhouse_streaming_fetch_next_block(sq);
+                    }
+                }
+
+                /* Store block based on type */
+                if (block->row_count > 0) {
+                    if (packet_type == CH_SERVER_TOTALS) {
+                        clickhouse_block_free(sq->totals);
+                        sq->totals = block;
+                        /* Continue processing packets - totals don't count as data */
+                    } else if (packet_type == CH_SERVER_EXTREMES) {
+                        clickhouse_block_free(sq->extremes);
+                        sq->extremes = block;
+                        /* Continue processing packets - extremes don't count as data */
+                    } else {
+                        /* Regular data block - RETURN IT */
+                        sq->current_block = block;
+                        sq->current_row = 0;
+                        return 1;  /* Block available */
+                    }
+                } else {
+                    clickhouse_block_free(block);
+                }
+                break;
+            }
+
+            case CH_SERVER_EXCEPTION: {
+                sq->exception = clickhouse_exception_read(conn->read_buf);
+                if (sq->exception) {
+                    sq->error = strdup(sq->exception->message);
+                }
+                sq->done = 1;
+                sq->state = STREAM_STATE_ERROR;
+                return -1;
+            }
+
+            case CH_SERVER_PROGRESS: {
+                clickhouse_progress_read(conn->read_buf, &sq->progress);
+                /* Call progress callback if provided */
+                if (sq->options && sq->options->progress_callback) {
+                    sq->options->progress_callback(&sq->progress, sq->options->progress_user_data);
+                }
+                break;
+            }
+
+            case CH_SERVER_PROFILE_INFO: {
+                clickhouse_profile_info_read(conn->read_buf, &sq->profile);
+                break;
+            }
+
+            case CH_SERVER_LOG: {
+                clickhouse_log_entry *log_entry = clickhouse_log_entry_read(conn->read_buf);
+                if (log_entry) {
+                    if (sq->options && sq->options->log_callback) {
+                        sq->options->log_callback(log_entry, sq->options->log_user_data);
+                    }
+                    clickhouse_log_entry_free(log_entry);
+                }
+                break;
+            }
+
+            case CH_SERVER_END_OF_STREAM: {
+                sq->done = 1;
+                sq->state = STREAM_STATE_COMPLETE;
+                return 0;  /* Done, no more blocks */
+            }
+
+            case CH_SERVER_TABLE_COLUMNS: {
+                /* Skip table columns packet */
+                char *dummy;
+                size_t dummy_len;
+                if (clickhouse_buffer_read_string(conn->read_buf, &dummy, &dummy_len) == 0) {
+                    free(dummy);
+                    clickhouse_block *dummy_block = clickhouse_block_create();
+                    if (dummy_block) {
+                        clickhouse_block_read(conn->read_buf, dummy_block);
+                        clickhouse_block_free(dummy_block);
+                    }
+                }
+                break;
+            }
+
+            default:
+                sq->state = STREAM_STATE_ERROR;
+                sq->error = strdup("Unknown packet type from server");
+                return -1;
+        }
+    }
+
+    /* Ran out of buffer data - need more */
+    if (sq->done) {
+        sq->state = STREAM_STATE_COMPLETE;
+        return 0;
+    }
+
+    /* Recursively call to get more data */
+    sq->first_receive = 0;
+    return clickhouse_streaming_fetch_next_block(sq);
+}
+
+/* Check if streaming query is done */
+int clickhouse_streaming_is_done(clickhouse_streaming_query *sq) {
+    if (!sq) return 1;
+    return sq->done || sq->state == STREAM_STATE_COMPLETE || sq->state == STREAM_STATE_ERROR;
 }

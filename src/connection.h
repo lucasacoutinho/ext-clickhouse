@@ -91,6 +91,9 @@ int clickhouse_ssl_available(void);
 /* Progress callback type */
 typedef void (*clickhouse_progress_callback)(clickhouse_progress *progress, void *user_data);
 
+/* Log callback type */
+typedef void (*clickhouse_log_callback)(clickhouse_log_entry *entry, void *user_data);
+
 typedef struct {
     clickhouse_block **blocks;
     size_t block_count;
@@ -111,6 +114,8 @@ typedef struct {
     uint8_t compression;
     clickhouse_progress_callback progress_callback;
     void *progress_user_data;
+    clickhouse_log_callback log_callback;
+    void *log_user_data;
     char *query_id;                     /* Custom query ID */
     char *session_id;                   /* Session ID for stateful queries */
     uint8_t session_check;              /* Verify session exists */
@@ -137,6 +142,10 @@ int clickhouse_connection_send_data(clickhouse_connection *conn, clickhouse_bloc
 int clickhouse_connection_send_data_named(clickhouse_connection *conn, clickhouse_block *block, const char *table_name);
 int clickhouse_connection_send_empty_block(clickhouse_connection *conn);
 int clickhouse_connection_send_external_tables(clickhouse_connection *conn, clickhouse_external_tables *tables);
+
+/* Insert raw formatted data (CSV, TSV, JSONEachRow, etc.) */
+int clickhouse_connection_insert_format_data(clickhouse_connection *conn, const char *table,
+                                              const char *format, const void *data, size_t data_len);
 
 /* Query cancellation */
 int clickhouse_connection_cancel(clickhouse_connection *conn);
@@ -171,5 +180,59 @@ int clickhouse_async_poll(clickhouse_connection *conn, clickhouse_async_query *a
 
 /* Check if connection has data waiting to be read (non-blocking) */
 int clickhouse_connection_has_data(clickhouse_connection *conn, int timeout_ms);
+
+/* Streaming query support - true row-by-row streaming without buffering */
+typedef enum {
+    STREAM_STATE_INIT = 0,
+    STREAM_STATE_SENT,
+    STREAM_STATE_RECEIVING,
+    STREAM_STATE_COMPLETE,
+    STREAM_STATE_ERROR
+} clickhouse_stream_state;
+
+typedef struct {
+    clickhouse_connection *conn;
+    clickhouse_stream_state state;
+    clickhouse_query_options *options;
+    char *query_id;
+
+    /* Current block being streamed */
+    clickhouse_block *current_block;
+    size_t current_row;
+
+    /* Streaming state */
+    int done;
+    int first_receive;
+
+    /* Metadata blocks */
+    clickhouse_block *totals;
+    clickhouse_block *extremes;
+
+    /* Progress and profile tracking */
+    clickhouse_progress progress;
+    clickhouse_profile_info profile;
+
+    /* Error handling */
+    clickhouse_exception *exception;
+    char *error;
+} clickhouse_streaming_query;
+
+/* Streaming query lifecycle */
+clickhouse_streaming_query *clickhouse_streaming_query_create(void);
+void clickhouse_streaming_query_free(clickhouse_streaming_query *sq);
+
+/* Initialize and start streaming query - sends query and prepares for streaming */
+int clickhouse_connection_query_streaming(clickhouse_connection *conn, const char *query,
+                                          clickhouse_query_options *options,
+                                          clickhouse_streaming_query **sq_out);
+
+/* Fetch next block from server - returns 1 if block available, 0 if done, -1 on error */
+int clickhouse_streaming_fetch_next_block(clickhouse_streaming_query *sq);
+
+/* Get current row from current block - advances to next row */
+int clickhouse_streaming_get_current_row(clickhouse_streaming_query *sq, void **row_data);
+
+/* Check if streaming query is complete */
+int clickhouse_streaming_is_done(clickhouse_streaming_query *sq);
 
 #endif /* CLICKHOUSE_CONNECTION_H */

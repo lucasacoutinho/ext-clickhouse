@@ -2,7 +2,7 @@
   +----------------------------------------------------------------------+
   | ClickHouse Native Driver for PHP                                    |
   +----------------------------------------------------------------------+
-  | Copyright (c) 2024                                                  |
+  | Copyright (c) 2025 Lucas Coutinho                                   |
   +----------------------------------------------------------------------+
   | This source file is subject to the MIT license that is bundled      |
   | with this package in the file LICENSE.                              |
@@ -16,7 +16,7 @@ extern zend_module_entry clickhouse_module_entry;
 #define phpext_clickhouse_ptr &clickhouse_module_entry
 
 #ifndef PHP_CLICKHOUSE_VERSION
-#define PHP_CLICKHOUSE_VERSION "1.0.0"
+#define PHP_CLICKHOUSE_VERSION "0.2.0"
 #endif
 #define PHP_CLICKHOUSE_EXTNAME "clickhouse"
 

@@ -54,6 +54,7 @@ tests/*.diff
 tests/*.exp
 tests/*.sh
 tests/*.mem
+tests/*.php
 
 # IDE
 .idea/

@@ -16,7 +16,9 @@
 #include "php.h"
 #include "php_ini.h"
 #include "ext/standard/info.h"
+#include "ext/standard/url.h"
 #include "ext/spl/spl_iterators.h"
+#include "ext/json/php_json.h"
 #include "zend_exceptions.h"
 #include "zend_interfaces.h"
 #include "zend_smart_str.h"
@@ -36,6 +38,7 @@ zend_class_entry *clickhouse_client_ce;
 zend_class_entry *clickhouse_statement_ce;
 zend_class_entry *clickhouse_asyncresult_ce;
 zend_class_entry *clickhouse_resultiterator_ce;
+zend_class_entry *clickhouse_streamingiterator_ce;
 zend_class_entry *clickhouse_exception_ce;
 
 /* Object handlers */
@@ -43,6 +46,7 @@ static zend_object_handlers clickhouse_client_handlers;
 static zend_object_handlers clickhouse_statement_handlers;
 static zend_object_handlers clickhouse_asyncresult_handlers;
 static zend_object_handlers clickhouse_resultiterator_handlers;
+static zend_object_handlers clickhouse_streamingiterator_handlers;
 
 /* Client object structure */
 typedef struct {
@@ -60,9 +64,33 @@ typedef struct {
     char *saved_user;
     char *saved_password;
     char *saved_database;
+    /* Retry configuration */
+    zend_long max_retry_attempts;    /* Maximum number of retry attempts (0=no limit) */
+    double retry_base_delay;         /* Base delay in seconds for exponential backoff */
+    double retry_max_delay;          /* Maximum delay in seconds between retries */
+    zend_bool retry_jitter;          /* Enable jitter in retry delays */
+    zend_long total_retry_attempts;  /* Total retry attempts made (for metrics) */
     /* Query tracking and settings */
     char *last_query_id;             /* Query ID from last executed query */
     clickhouse_settings *query_settings;  /* Per-query settings to apply to all queries */
+    /* Callbacks */
+    zval progress_callback;          /* Progress callback for query execution */
+    zval profile_callback;           /* Profile callback for query profiling info */
+    zval log_callback;               /* Log callback for server log messages */
+    /* Safety features */
+    zend_bool readonly;              /* Read-only mode - prevents write operations */
+    /* Transaction support (EXPERIMENTAL) */
+    zend_bool in_transaction;        /* Currently in a transaction */
+    char *transaction_id;            /* Transaction ID (session based) */
+    /* Metrics tracking */
+    zend_bool metrics_enabled;       /* Enable metrics collection */
+    zend_long queries_executed;      /* Total queries executed */
+    zend_long queries_failed;        /* Total queries failed */
+    double total_query_time;         /* Total query execution time (seconds) */
+    zend_long total_rows_read;       /* Total rows read */
+    zend_long total_bytes_read;      /* Total bytes read */
+    zend_long slow_queries;          /* Queries exceeding slow threshold */
+    double slow_query_threshold;     /* Threshold in seconds for slow queries (0=disabled) */
     zend_object std;
 } clickhouse_client_object;
 
@@ -85,7 +113,7 @@ typedef struct {
     zend_object std;
 } clickhouse_asyncresult_object;
 
-/* ResultIterator object structure - for streaming/iterating results */
+/* ResultIterator object structure - for buffered iteration (loads all data first) */
 typedef struct {
     zval client_zv;                  /* Reference to client object */
     clickhouse_connection *conn;     /* Borrowed reference */
@@ -97,6 +125,20 @@ typedef struct {
     zend_bool finished;              /* Has iteration finished? */
     zend_object std;
 } clickhouse_resultiterator_object;
+
+/* StreamingIterator object structure - for true streaming (block-by-block from server) */
+typedef struct {
+    zval client_zv;                  /* Reference to client object */
+    clickhouse_connection *conn;     /* Borrowed reference */
+    clickhouse_streaming_query *sq;  /* Streaming query handle */
+    char *query_sql;                 /* SQL query for re-execution on rewind */
+    size_t current_row;              /* Current row within current block */
+    zend_long current_key;           /* Current iterator key (total row index) */
+    zend_long total_rows;            /* Total rows fetched so far */
+    zend_bool valid;                 /* Is current position valid? */
+    zend_bool started;               /* Has iteration started? */
+    zend_object std;
+} clickhouse_streamingiterator_object;
 
 /* Helper to get client object from zend_object */
 static inline clickhouse_client_object *clickhouse_client_from_obj(zend_object *obj) {
@@ -115,10 +157,15 @@ static inline clickhouse_resultiterator_object *clickhouse_resultiterator_from_o
     return (clickhouse_resultiterator_object *)((char *)obj - XtOffsetOf(clickhouse_resultiterator_object, std));
 }
 
+static inline clickhouse_streamingiterator_object *clickhouse_streamingiterator_from_obj(zend_object *obj) {
+    return (clickhouse_streamingiterator_object *)((char *)obj - XtOffsetOf(clickhouse_streamingiterator_object, std));
+}
+
 #define Z_CLICKHOUSE_CLIENT_P(zv) clickhouse_client_from_obj(Z_OBJ_P(zv))
 #define Z_CLICKHOUSE_STATEMENT_P(zv) clickhouse_statement_from_obj(Z_OBJ_P(zv))
 #define Z_CLICKHOUSE_ASYNCRESULT_P(zv) clickhouse_asyncresult_from_obj(Z_OBJ_P(zv))
 #define Z_CLICKHOUSE_RESULTITERATOR_P(zv) clickhouse_resultiterator_from_obj(Z_OBJ_P(zv))
+#define Z_CLICKHOUSE_STREAMINGITERATOR_P(zv) clickhouse_streamingiterator_from_obj(Z_OBJ_P(zv))
 
 /* {{{ Free client object */
 static void clickhouse_client_free(zend_object *object) {
@@ -197,6 +244,20 @@ static void clickhouse_client_free(zend_object *object) {
         intern->query_settings = NULL;
     }
 
+    /* Free callbacks */
+    if (!Z_ISUNDEF(intern->progress_callback)) {
+        zval_ptr_dtor(&intern->progress_callback);
+        ZVAL_UNDEF(&intern->progress_callback);
+    }
+    if (!Z_ISUNDEF(intern->profile_callback)) {
+        zval_ptr_dtor(&intern->profile_callback);
+        ZVAL_UNDEF(&intern->profile_callback);
+    }
+    if (!Z_ISUNDEF(intern->log_callback)) {
+        zval_ptr_dtor(&intern->log_callback);
+        ZVAL_UNDEF(&intern->log_callback);
+    }
+
     zend_object_std_dtor(&intern->std);
 }
 /* }}} */
@@ -218,9 +279,33 @@ static zend_object *clickhouse_client_create(zend_class_entry *ce) {
     intern->saved_user = NULL;
     intern->saved_password = NULL;
     intern->saved_database = NULL;
+    /* Initialize retry configuration */
+    intern->max_retry_attempts = 3;      /* Default: 3 retries */
+    intern->retry_base_delay = 0.1;      /* Default: 100ms base delay */
+    intern->retry_max_delay = 5.0;       /* Default: 5 seconds max delay */
+    intern->retry_jitter = 1;            /* Default: jitter enabled */
+    intern->total_retry_attempts = 0;
     /* Initialize query tracking and settings */
     intern->last_query_id = NULL;
     intern->query_settings = NULL;
+    /* Initialize callbacks */
+    ZVAL_UNDEF(&intern->progress_callback);
+    ZVAL_UNDEF(&intern->profile_callback);
+    ZVAL_UNDEF(&intern->log_callback);
+    /* Initialize safety features */
+    intern->readonly = 0;
+    /* Initialize transaction support */
+    intern->in_transaction = 0;
+    intern->transaction_id = NULL;
+    /* Initialize metrics */
+    intern->metrics_enabled = 0;
+    intern->queries_executed = 0;
+    intern->queries_failed = 0;
+    intern->total_query_time = 0.0;
+    intern->total_rows_read = 0;
+    intern->total_bytes_read = 0;
+    intern->slow_queries = 0;
+    intern->slow_query_threshold = 0.0;
 
     zend_object_std_init(&intern->std, ce);
     object_properties_init(&intern->std, ce);
@@ -323,6 +408,50 @@ static void clickhouse_resultiterator_free(zend_object *object) {
     ZVAL_UNDEF(&intern->client_zv);
 
     zend_object_std_dtor(&intern->std);
+}
+/* }}} */
+
+/* {{{ Free streaming iterator object */
+static void clickhouse_streamingiterator_free(zend_object *object) {
+    clickhouse_streamingiterator_object *intern = clickhouse_streamingiterator_from_obj(object);
+
+    if (intern->sq) {
+        clickhouse_streaming_query_free(intern->sq);
+        intern->sq = NULL;
+    }
+
+    if (intern->query_sql) {
+        efree(intern->query_sql);
+        intern->query_sql = NULL;
+    }
+
+    zval_ptr_dtor(&intern->client_zv);
+    ZVAL_UNDEF(&intern->client_zv);
+
+    zend_object_std_dtor(&intern->std);
+}
+/* }}} */
+
+/* {{{ Create streaming iterator object */
+static zend_object *clickhouse_streamingiterator_create(zend_class_entry *ce) {
+    clickhouse_streamingiterator_object *intern = zend_object_alloc(sizeof(clickhouse_streamingiterator_object), ce);
+
+    intern->conn = NULL;
+    intern->sq = NULL;
+    intern->query_sql = NULL;
+    intern->current_row = 0;
+    intern->current_key = 0;
+    intern->total_rows = 0;
+    intern->valid = 0;
+    intern->started = 0;
+    ZVAL_UNDEF(&intern->client_zv);
+
+    zend_object_std_init(&intern->std, ce);
+    object_properties_init(&intern->std, ce);
+
+    intern->std.handlers = &clickhouse_streamingiterator_handlers;
+
+    return &intern->std;
 }
 /* }}} */
 
@@ -490,6 +619,384 @@ static void nested_value_to_zval(clickhouse_column *col, size_t index, clickhous
 /* Forward declaration for parameter substitution */
 static char *substitute_params(const char *query, clickhouse_params *params);
 
+/* Helper: Convert PHP associative array to ClickHouse Map format */
+static char *serialize_php_map_to_clickhouse(zval *arr) {
+    smart_str result = {0};
+    smart_str_appends(&result, "{");  /* ClickHouse Map literal syntax */
+
+    HashTable *ht = Z_ARRVAL_P(arr);
+    zval *val;
+    zend_string *key;
+    zend_ulong idx;
+    int first = 1;
+
+    ZEND_HASH_FOREACH_KEY_VAL(ht, idx, key, val) {
+        if (!first) {
+            smart_str_appendc(&result, ',');
+        }
+        first = 0;
+
+        /* Key (always string) */
+        smart_str_appendc(&result, '\'');
+        if (key) {
+            /* String key */
+            for (const char *s = ZSTR_VAL(key); *s; s++) {
+                if (*s == '\'') smart_str_appendc(&result, '\'');
+                smart_str_appendc(&result, *s);
+            }
+        } else {
+            /* Numeric key - convert to string */
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%lu", idx);
+            smart_str_appends(&result, buf);
+        }
+        smart_str_appendc(&result, '\'');
+        smart_str_appendc(&result, ':');
+
+        /* Value */
+        switch (Z_TYPE_P(val)) {
+            case IS_STRING:
+                smart_str_appendc(&result, '\'');
+                for (const char *s = Z_STRVAL_P(val); *s; s++) {
+                    if (*s == '\'') smart_str_appendc(&result, '\'');
+                    smart_str_appendc(&result, *s);
+                }
+                smart_str_appendc(&result, '\'');
+                break;
+            case IS_LONG:
+                smart_str_append_long(&result, Z_LVAL_P(val));
+                break;
+            case IS_DOUBLE: {
+                char buf[64];
+                snprintf(buf, sizeof(buf), "%.16g", Z_DVAL_P(val));
+                smart_str_appends(&result, buf);
+                break;
+            }
+            case IS_TRUE:
+                smart_str_appendc(&result, '1');
+                break;
+            case IS_FALSE:
+                smart_str_appendc(&result, '0');
+                break;
+            default:
+                smart_str_appends(&result, "''");
+                break;
+        }
+    } ZEND_HASH_FOREACH_END();
+
+    smart_str_appendc(&result, '}');
+    smart_str_0(&result);
+
+    char *ret = estrdup(ZSTR_VAL(result.s));
+    smart_str_free(&result);
+    return ret;
+}
+
+/* Helper: Convert PHP array to ClickHouse array string representation */
+static char *serialize_php_array_to_clickhouse(zval *arr) {
+    smart_str result = {0};
+    smart_str_appendc(&result, '[');
+
+    HashTable *ht = Z_ARRVAL_P(arr);
+    zval *elem;
+    int first = 1;
+
+    ZEND_HASH_FOREACH_VAL(ht, elem) {
+        if (!first) {
+            smart_str_appendc(&result, ',');
+        }
+        first = 0;
+
+        switch (Z_TYPE_P(elem)) {
+            case IS_STRING:
+                /* String elements need quotes and escaping */
+                smart_str_appendc(&result, '\'');
+                for (const char *s = Z_STRVAL_P(elem); *s; s++) {
+                    if (*s == '\'') smart_str_appendc(&result, '\'');
+                    smart_str_appendc(&result, *s);
+                }
+                smart_str_appendc(&result, '\'');
+                break;
+            case IS_LONG:
+                smart_str_append_long(&result, Z_LVAL_P(elem));
+                break;
+            case IS_DOUBLE: {
+                char buf[64];
+                snprintf(buf, sizeof(buf), "%.16g", Z_DVAL_P(elem));
+                smart_str_appends(&result, buf);
+                break;
+            }
+            default:
+                /* Convert to string */
+                smart_str_appends(&result, "''");
+                break;
+        }
+    } ZEND_HASH_FOREACH_END();
+
+    smart_str_appendc(&result, ']');
+    smart_str_0(&result);
+
+    char *ret = estrdup(ZSTR_VAL(result.s));
+    smart_str_free(&result);
+    return ret;
+}
+
+/* Helper: Detect ClickHouse type from PHP zval */
+static const char *detect_clickhouse_type_from_zval(zval *val) {
+    switch (Z_TYPE_P(val)) {
+        case IS_STRING: {
+            const char *str = Z_STRVAL_P(val);
+            size_t len = Z_STRLEN_P(val);
+
+            /* UUID format: 8-4-4-4-12 (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx) */
+            if (len == 36 && str[8] == '-' && str[13] == '-' && str[18] == '-' && str[23] == '-') {
+                int is_uuid = 1;
+                for (size_t i = 0; i < len && is_uuid; i++) {
+                    if (i == 8 || i == 13 || i == 18 || i == 23) continue;
+                    char c = str[i];
+                    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+                        is_uuid = 0;
+                    }
+                }
+                if (is_uuid) return "UUID";
+            }
+
+            /* IPv4 format: xxx.xxx.xxx.xxx */
+            if (len >= 7 && len <= 15) {
+                int dots = 0;
+                int is_ipv4 = 1;
+                for (size_t i = 0; i < len; i++) {
+                    if (str[i] == '.') dots++;
+                    else if (str[i] < '0' || str[i] > '9') {
+                        is_ipv4 = 0;
+                        break;
+                    }
+                }
+                if (is_ipv4 && dots == 3) return "IPv4";
+            }
+
+            /* IPv6 format: contains colons and hex digits */
+            if (len >= 2 && len <= 39) {
+                int colons = 0;
+                int is_ipv6 = 1;
+                for (size_t i = 0; i < len; i++) {
+                    char c = str[i];
+                    if (c == ':') colons++;
+                    else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+                        is_ipv6 = 0;
+                        break;
+                    }
+                }
+                if (is_ipv6 && colons >= 2) return "IPv6";
+            }
+
+            /* DateTime format: YYYY-MM-DD HH:MM:SS or with milliseconds */
+            if (len >= 19 && len <= 26) {
+                if (str[4] == '-' && str[7] == '-' && str[10] == ' ' && str[13] == ':' && str[16] == ':') {
+                    /* Check for microseconds: YYYY-MM-DD HH:MM:SS.ffffff */
+                    if (len > 19 && str[19] == '.') {
+                        return "DateTime64(6)";  /* Microsecond precision */
+                    } else if (len > 19 && str[19] == '.') {
+                        return "DateTime64(3)";  /* Millisecond precision */
+                    }
+                    return "DateTime";
+                }
+            }
+
+            /* Date format: YYYY-MM-DD */
+            if (len == 10 && str[4] == '-' && str[7] == '-') {
+                int is_date = 1;
+                for (size_t i = 0; i < len && is_date; i++) {
+                    if (i == 4 || i == 7) continue;
+                    if (str[i] < '0' || str[i] > '9') is_date = 0;
+                }
+                if (is_date) return "Date";
+            }
+
+            /* Decimal detection - numeric string with decimal point */
+            /* Only detect if it looks like a decimal number: digits, optional sign, one decimal point */
+            if (len >= 3 && len <= 40) {  /* Reasonable length for decimal */
+                int has_decimal = 0;
+                int has_digits = 0;
+                int is_decimal = 1;
+                size_t start = 0;
+
+                /* Skip leading sign */
+                if (str[0] == '-' || str[0] == '+') start = 1;
+
+                for (size_t i = start; i < len && is_decimal; i++) {
+                    if (str[i] == '.') {
+                        if (has_decimal) {
+                            /* Multiple decimal points */
+                            is_decimal = 0;
+                        }
+                        has_decimal = 1;
+                    } else if (str[i] >= '0' && str[i] <= '9') {
+                        has_digits = 1;
+                    } else {
+                        /* Non-numeric character */
+                        is_decimal = 0;
+                    }
+                }
+
+                if (is_decimal && has_decimal && has_digits) {
+                    /* Count decimal places to determine precision */
+                    const char *decimal_point = strchr(str, '.');
+                    if (decimal_point) {
+                        size_t decimal_places = len - (decimal_point - str) - 1;
+                        size_t total_digits = has_digits ? (len - start - 1) : 0;  /* Subtract decimal point */
+
+                        /* Infer Decimal(P, S) where P is total precision and S is scale */
+                        /* Use common patterns: Decimal(18,2) for currency, Decimal(10,4) for rates */
+                        if (decimal_places <= 2 && total_digits <= 18) {
+                            return "Decimal(18,2)";  /* Common for currency */
+                        } else if (decimal_places <= 4 && total_digits <= 10) {
+                            return "Decimal(10,4)";  /* Common for rates/percentages */
+                        } else if (decimal_places <= 6 && total_digits <= 18) {
+                            return "Decimal(18,6)";  /* High precision */
+                        } else {
+                            return "Decimal(38,9)";  /* Max precision */
+                        }
+                    }
+                }
+            }
+
+            return "String";
+        }
+        case IS_LONG: {
+            /* Auto-detect integer size based on value range */
+            zend_long val_long = Z_LVAL_P(val);
+
+            if (val_long >= 0) {
+                /* Unsigned range detection */
+                if (val_long <= 255) return "UInt8";
+                if (val_long <= 65535) return "UInt16";
+                if (val_long <= 4294967295L) return "UInt32";
+                return "UInt64";
+            } else {
+                /* Signed range detection */
+                if (val_long >= -128 && val_long <= 127) return "Int8";
+                if (val_long >= -32768 && val_long <= 32767) return "Int16";
+                if (val_long >= -2147483648L && val_long <= 2147483647L) return "Int32";
+                return "Int64";
+            }
+        }
+        case IS_DOUBLE:
+            return "Float64";
+        case IS_TRUE:
+        case IS_FALSE:
+            return "UInt8";
+        case IS_NULL:
+            return "Nullable(String)";
+        case IS_ARRAY: {
+            HashTable *ht = Z_ARRVAL_P(val);
+
+            /* Check if it's an associative array (for JSON/Map) vs numeric array */
+            int is_list = 1;
+            int has_string_keys = 0;
+            zend_ulong expected_idx = 0;
+            zend_string *key;
+            zend_ulong idx;
+
+            ZEND_HASH_FOREACH_KEY(ht, idx, key) {
+                if (key != NULL) {
+                    /* String key found - it's associative */
+                    is_list = 0;
+                    has_string_keys = 1;
+                    break;
+                }
+                if (idx != expected_idx) {
+                    /* Non-sequential numeric keys - it's associative */
+                    is_list = 0;
+                    break;
+                }
+                expected_idx++;
+            } ZEND_HASH_FOREACH_END();
+
+            /* Associative array - try to detect as Map or fallback to JSON */
+            if (!is_list && zend_hash_num_elements(ht) > 0) {
+                /* Check if all values are of consistent type for Map detection */
+                int value_type = -1;  /* -1 = unknown, 0 = mixed, >0 = consistent */
+                int consistent = 1;
+                int is_simple = 1;  /* Only simple types (not nested arrays/objects) */
+                zval *map_val;
+
+                ZEND_HASH_FOREACH_VAL(ht, map_val) {
+                    int current_type = Z_TYPE_P(map_val);
+
+                    /* Check if value is simple (not array/object) */
+                    if (current_type == IS_ARRAY || current_type == IS_OBJECT) {
+                        is_simple = 0;
+                        break;
+                    }
+
+                    if (value_type == -1) {
+                        value_type = current_type;
+                    } else if (value_type != current_type) {
+                        consistent = 0;
+                        break;
+                    }
+                } ZEND_HASH_FOREACH_END();
+
+                /* If values are consistent simple types, treat as Map */
+                if (consistent && is_simple && value_type != -1) {
+                    /* Determine value type for Map */
+                    const char *map_value_type;
+                    switch (value_type) {
+                        case IS_LONG:
+                            map_value_type = "Int64";
+                            break;
+                        case IS_DOUBLE:
+                            map_value_type = "Float64";
+                            break;
+                        case IS_STRING:
+                            map_value_type = "String";
+                            break;
+                        case IS_TRUE:
+                        case IS_FALSE:
+                            map_value_type = "UInt8";
+                            break;
+                        default:
+                            /* Fallback to JSON for complex types */
+                            return "String";
+                    }
+
+                    /* Return Map(String, ValueType) - keys are always strings in PHP arrays */
+                    static char map_type[64];
+                    snprintf(map_type, sizeof(map_type), "Map(String,%s)", map_value_type);
+                    return map_type;
+                }
+
+                /* Mixed types or complex values - use JSON encoding */
+                return "String";  /* Will be JSON-encoded */
+            }
+
+            /* Numeric array - detect element type */
+            if (zend_hash_num_elements(ht) > 0) {
+                zval *first_elem = NULL;
+                ZEND_HASH_FOREACH_VAL(ht, first_elem) {
+                    if (first_elem) {
+                        switch (Z_TYPE_P(first_elem)) {
+                            case IS_LONG:
+                                return "Array(Int64)";
+                            case IS_DOUBLE:
+                                return "Array(Float64)";
+                            case IS_STRING:
+                                return "Array(String)";
+                            default:
+                                return "Array(String)";
+                        }
+                    }
+                    break;
+                } ZEND_HASH_FOREACH_END();
+            }
+            return "Array(String)";
+        }
+        default:
+            return "String";
+    }
+}
+
 /* Helper: Convert ClickHouse column value to PHP zval */
 static void column_value_to_zval(clickhouse_column *col, size_t row, zval *zv) {
     clickhouse_type_info *type = col->type;
@@ -519,15 +1026,30 @@ static void column_value_to_zval(clickhouse_column *col, size_t row, zval *zv) {
             ZVAL_LONG(zv, data[row]);
             break;
         }
-        case CH_TYPE_INT64: {
+        case CH_TYPE_INT64:
+        case CH_TYPE_INTERVAL_NANOSECOND:
+        case CH_TYPE_INTERVAL_MICROSECOND:
+        case CH_TYPE_INTERVAL_MILLISECOND:
+        case CH_TYPE_INTERVAL_SECOND:
+        case CH_TYPE_INTERVAL_MINUTE:
+        case CH_TYPE_INTERVAL_HOUR:
+        case CH_TYPE_INTERVAL_DAY:
+        case CH_TYPE_INTERVAL_WEEK:
+        case CH_TYPE_INTERVAL_MONTH:
+        case CH_TYPE_INTERVAL_QUARTER:
+        case CH_TYPE_INTERVAL_YEAR: {
             int64_t *data = (int64_t *)col->data;
             ZVAL_LONG(zv, (zend_long)data[row]);
             break;
         }
-        case CH_TYPE_UINT8:
-        case CH_TYPE_BOOL: {
+        case CH_TYPE_UINT8: {
             uint8_t *data = (uint8_t *)col->data;
             ZVAL_LONG(zv, data[row]);
+            break;
+        }
+        case CH_TYPE_BOOL: {
+            uint8_t *data = (uint8_t *)col->data;
+            ZVAL_BOOL(zv, data[row]);
             break;
         }
         case CH_TYPE_UINT16: {
@@ -726,6 +1248,15 @@ static void column_value_to_zval(clickhouse_column *col, size_t row, zval *zv) {
         case CH_TYPE_FLOAT64: {
             double *data = (double *)col->data;
             ZVAL_DOUBLE(zv, data[row]);
+            break;
+        }
+        case CH_TYPE_BFLOAT16: {
+            /* BFloat16: 16-bit brain float - same exponent as float32, truncated mantissa */
+            uint16_t *data = (uint16_t *)col->data;
+            uint32_t as_float32 = ((uint32_t)data[row]) << 16;
+            float f;
+            memcpy(&f, &as_float32, sizeof(float));
+            ZVAL_DOUBLE(zv, (double)f);
             break;
         }
         case CH_TYPE_STRING: {
@@ -1163,9 +1694,23 @@ static void column_value_to_zval(clickhouse_column *col, size_t row, zval *zv) {
             break;
         }
         case CH_TYPE_JSON:
-        case CH_TYPE_OBJECT:
+        case CH_TYPE_OBJECT: {
+            /* JSON/Object - parse JSON string to PHP array/object */
+            char **strings = (char **)col->data;
+            if (strings && strings[row]) {
+                size_t len = strlen(strings[row]);
+                php_json_decode_ex(zv, strings[row], len, PHP_JSON_OBJECT_AS_ARRAY, 512);
+                /* If JSON parsing failed, return as string */
+                if (Z_TYPE_P(zv) == IS_NULL && len > 0) {
+                    ZVAL_STRING(zv, strings[row]);
+                }
+            } else {
+                ZVAL_NULL(zv);
+            }
+            break;
+        }
         case CH_TYPE_DYNAMIC: {
-            /* JSON/Object/Dynamic - stored as string, return as string */
+            /* Dynamic - stored as string, return as string (type info not available) */
             char **strings = (char **)col->data;
             if (strings && strings[row]) {
                 ZVAL_STRING(zv, strings[row]);
@@ -1229,15 +1774,30 @@ static void nested_value_to_zval(clickhouse_column *col, size_t index, clickhous
             ZVAL_LONG(zv, data[index]);
             break;
         }
-        case CH_TYPE_INT64: {
+        case CH_TYPE_INT64:
+        case CH_TYPE_INTERVAL_NANOSECOND:
+        case CH_TYPE_INTERVAL_MICROSECOND:
+        case CH_TYPE_INTERVAL_MILLISECOND:
+        case CH_TYPE_INTERVAL_SECOND:
+        case CH_TYPE_INTERVAL_MINUTE:
+        case CH_TYPE_INTERVAL_HOUR:
+        case CH_TYPE_INTERVAL_DAY:
+        case CH_TYPE_INTERVAL_WEEK:
+        case CH_TYPE_INTERVAL_MONTH:
+        case CH_TYPE_INTERVAL_QUARTER:
+        case CH_TYPE_INTERVAL_YEAR: {
             int64_t *data = (int64_t *)col->data;
             ZVAL_LONG(zv, (zend_long)data[index]);
             break;
         }
-        case CH_TYPE_UINT8:
-        case CH_TYPE_BOOL: {
+        case CH_TYPE_UINT8: {
             uint8_t *data = (uint8_t *)col->data;
             ZVAL_LONG(zv, data[index]);
+            break;
+        }
+        case CH_TYPE_BOOL: {
+            uint8_t *data = (uint8_t *)col->data;
+            ZVAL_BOOL(zv, data[index]);
             break;
         }
         case CH_TYPE_UINT16: {
@@ -1351,6 +1911,15 @@ static void nested_value_to_zval(clickhouse_column *col, size_t index, clickhous
         case CH_TYPE_FLOAT64: {
             double *data = (double *)col->data;
             ZVAL_DOUBLE(zv, data[index]);
+            break;
+        }
+        case CH_TYPE_BFLOAT16: {
+            /* BFloat16: 16-bit brain float - same exponent as float32, truncated mantissa */
+            uint16_t *data = (uint16_t *)col->data;
+            uint32_t as_float32 = ((uint32_t)data[index]) << 16;
+            float f;
+            memcpy(&f, &as_float32, sizeof(float));
+            ZVAL_DOUBLE(zv, (double)f);
             break;
         }
         case CH_TYPE_STRING: {
@@ -1493,6 +2062,33 @@ static void nested_value_to_zval(clickhouse_column *col, size_t index, clickhous
             }
             break;
         }
+        case CH_TYPE_MAP: {
+            /* Map type - convert to PHP associative array */
+            array_init(zv);
+            if (col->offsets && col->tuple_columns && col->tuple_column_count == 2) {
+                size_t start = (index == 0) ? 0 : (size_t)col->offsets[index - 1];
+                size_t end = (size_t)col->offsets[index];
+                clickhouse_column *keys_col = col->tuple_columns[0];
+                clickhouse_column *vals_col = col->tuple_columns[1];
+                for (size_t i = start; i < end; i++) {
+                    zval key, val;
+                    nested_value_to_zval(keys_col, i, type->tuple_elements[0], &key);
+                    nested_value_to_zval(vals_col, i, type->tuple_elements[1], &val);
+                    if (Z_TYPE(key) == IS_STRING) {
+                        add_assoc_zval_ex(zv, Z_STRVAL(key), Z_STRLEN(key), &val);
+                        zval_ptr_dtor(&key);
+                    } else if (Z_TYPE(key) == IS_LONG) {
+                        add_index_zval(zv, Z_LVAL(key), &val);
+                    } else {
+                        zend_string *str = zval_get_string(&key);
+                        add_assoc_zval_ex(zv, ZSTR_VAL(str), ZSTR_LEN(str), &val);
+                        zend_string_release(str);
+                        zval_ptr_dtor(&key);
+                    }
+                }
+            }
+            break;
+        }
         default:
             ZVAL_NULL(zv);
             break;
@@ -1522,6 +2118,11 @@ static void block_to_php_array(clickhouse_block *block, zval *return_value) {
 /* Helper: Convert result blocks to PHP array */
 static void result_to_php_array(clickhouse_result *result, zval *return_value) {
     array_init(return_value);
+
+    /* Defensive null check */
+    if (!result) {
+        return;
+    }
 
     for (size_t b = 0; b < result->block_count; b++) {
         clickhouse_block *block = result->blocks[b];
@@ -1553,7 +2154,37 @@ static int is_connection_error(const char *error) {
             strstr(error, "Network is unreachable") != NULL);
 }
 
-/* Helper: Attempt to reconnect */
+/* Helper: Calculate retry delay with exponential backoff and optional jitter */
+static double calculate_retry_delay(clickhouse_client_object *intern, int attempt) {
+    /* Calculate exponential backoff: base_delay * 2^attempt */
+    double delay = intern->retry_base_delay * (1 << attempt);
+
+    /* Cap at max_delay */
+    if (delay > intern->retry_max_delay) {
+        delay = intern->retry_max_delay;
+    }
+
+    /* Add jitter if enabled (randomize between 50% and 100% of delay) */
+    if (intern->retry_jitter) {
+        /* Simple jitter: delay * (0.5 + random(0.5)) */
+        double jitter_factor = 0.5 + ((double)rand() / RAND_MAX) * 0.5;
+        delay *= jitter_factor;
+    }
+
+    return delay;
+}
+
+/* Helper: Sleep for specified seconds (with microsecond precision) */
+static void retry_sleep(double seconds) {
+    if (seconds > 0) {
+        struct timeval tv;
+        tv.tv_sec = (time_t)seconds;
+        tv.tv_usec = (suseconds_t)((seconds - tv.tv_sec) * 1000000);
+        select(0, NULL, NULL, NULL, &tv);
+    }
+}
+
+/* Helper: Attempt to reconnect with retry logic */
 static int attempt_reconnect(clickhouse_client_object *intern) {
     /* Check if we have saved connection parameters */
     if (!intern->saved_host || !intern->saved_user ||
@@ -1561,34 +2192,192 @@ static int attempt_reconnect(clickhouse_client_object *intern) {
         return 0;
     }
 
-    /* Close existing connection if any */
-    if (intern->conn) {
-        clickhouse_connection_close(intern->conn);
+    /* Determine max attempts (0 = unlimited, but cap at 10 for safety) */
+    zend_long max_attempts = intern->max_retry_attempts > 0 ? intern->max_retry_attempts : 10;
+
+    for (zend_long attempt = 0; attempt < max_attempts; attempt++) {
+        /* Add delay before retry (except for first attempt) */
+        if (attempt > 0) {
+            double delay = calculate_retry_delay(intern, attempt - 1);
+            retry_sleep(delay);
+        }
+
+        /* Close existing connection if any */
+        if (intern->conn) {
+            clickhouse_connection_close(intern->conn);
+            clickhouse_connection_free(intern->conn);
+            intern->conn = NULL;
+        }
+
+        /* Create new connection with saved parameters */
+        intern->conn = clickhouse_connection_create(
+            intern->saved_host,
+            intern->saved_port,
+            intern->saved_user,
+            intern->saved_password,
+            intern->saved_database
+        );
+
+        if (!intern->conn) {
+            intern->total_retry_attempts++;
+            continue;  /* Try next attempt */
+        }
+
+        int result = clickhouse_connection_connect(intern->conn);
+        if (result == 0) {
+            /* Success! */
+            if (attempt > 0) {
+                intern->total_retry_attempts += attempt;
+            }
+            return 1;
+        }
+
+        /* Connection failed */
         clickhouse_connection_free(intern->conn);
         intern->conn = NULL;
+        intern->total_retry_attempts++;
     }
 
-    /* Create new connection with saved parameters */
-    intern->conn = clickhouse_connection_create(
-        intern->saved_host,
-        intern->saved_port,
-        intern->saved_user,
-        intern->saved_password,
-        intern->saved_database
-    );
+    /* All attempts exhausted */
+    return 0;
+}
 
-    if (!intern->conn) {
-        return 0;
+/* Helper: Update metrics after query execution */
+static void update_query_metrics(clickhouse_client_object *intern, double query_time, clickhouse_result *result, int success) {
+    if (!intern->metrics_enabled) {
+        return;
     }
 
-    int result = clickhouse_connection_connect(intern->conn);
-    if (result != 0) {
-        clickhouse_connection_free(intern->conn);
-        intern->conn = NULL;
-        return 0;
+    if (success) {
+        intern->queries_executed++;
+        intern->total_query_time += query_time;
+
+        /* Track rows and bytes from result profile if available */
+        if (result) {
+            intern->total_rows_read += result->profile.rows;
+            intern->total_bytes_read += result->profile.bytes;
+        }
+
+        /* Check if this is a slow query */
+        if (intern->slow_query_threshold > 0 && query_time >= intern->slow_query_threshold) {
+            intern->slow_queries++;
+        }
+    } else {
+        intern->queries_failed++;
+    }
+}
+
+/* Helper: Build detailed error message with query context */
+static void throw_query_error(const char *error, const char *original_query, const char *final_query) {
+    smart_str error_msg = {0};
+
+    /* Add the original error message */
+    smart_str_appends(&error_msg, error ? error : "Query failed");
+
+    /* Add query context if available */
+    if (original_query || final_query) {
+        smart_str_appends(&error_msg, "\n\n");
+        smart_str_appends(&error_msg, "Query Context:\n");
+
+        if (original_query && final_query && strcmp(original_query, final_query) != 0) {
+            /* Show both original and final query if they differ (parameters were substituted) */
+            smart_str_appends(&error_msg, "  Original: ");
+            smart_str_appends(&error_msg, original_query);
+            smart_str_appends(&error_msg, "\n");
+            smart_str_appends(&error_msg, "  Executed: ");
+            smart_str_appends(&error_msg, final_query);
+        } else {
+            /* Show just the query if no substitution occurred */
+            smart_str_appends(&error_msg, "  Query: ");
+            smart_str_appends(&error_msg, final_query ? final_query : original_query);
+        }
     }
 
-    return 1;
+    smart_str_0(&error_msg);
+    zend_throw_exception(clickhouse_exception_ce, ZSTR_VAL(error_msg.s), 0);
+    smart_str_free(&error_msg);
+}
+
+/* Helper: Build detailed error message for parameter substitution */
+static void throw_param_error(const char *param_name, const char *query, size_t param_position, const char *message) {
+    smart_str error_msg = {0};
+
+    /* Build error message with context */
+    smart_str_appends(&error_msg, "Parameter Error: ");
+    smart_str_appends(&error_msg, message);
+    smart_str_appends(&error_msg, "\n");
+
+    /* Add parameter details */
+    smart_str_appends(&error_msg, "  Parameter: '");
+    smart_str_appends(&error_msg, param_name);
+    smart_str_appends(&error_msg, "' at position ");
+    char pos_str[32];
+    snprintf(pos_str, sizeof(pos_str), "%zu", param_position);
+    smart_str_appends(&error_msg, pos_str);
+    smart_str_appends(&error_msg, "\n");
+
+    /* Add query context - show the query with error location */
+    smart_str_appends(&error_msg, "  Query: ");
+    smart_str_appends(&error_msg, query);
+    smart_str_appends(&error_msg, "\n");
+
+    /* Add pointer to error location */
+    smart_str_appends(&error_msg, "         ");
+    for (size_t i = 0; i < param_position; i++) {
+        smart_str_appendc(&error_msg, ' ');
+    }
+    smart_str_appends(&error_msg, "^");
+
+    smart_str_0(&error_msg);
+    zend_throw_exception(clickhouse_exception_ce, ZSTR_VAL(error_msg.s), 0);
+    smart_str_free(&error_msg);
+}
+
+/* Bridge function to call PHP log callback from C */
+static void php_log_callback_bridge(clickhouse_log_entry *entry, void *user_data) {
+    clickhouse_client_object *intern = (clickhouse_client_object *)user_data;
+
+    if (!intern || Z_ISUNDEF(intern->log_callback)) {
+        return;
+    }
+
+    zval args[6], retval;
+    ZVAL_LONG(&args[0], entry->time);
+    ZVAL_LONG(&args[1], entry->time_microseconds);
+    ZVAL_LONG(&args[2], entry->thread_id);
+    ZVAL_LONG(&args[3], entry->priority);
+    ZVAL_STRING(&args[4], entry->source ? entry->source : "");
+    ZVAL_STRING(&args[5], entry->text ? entry->text : "");
+
+    if (call_user_function(NULL, NULL, &intern->log_callback, &retval, 6, args) == SUCCESS) {
+        zval_ptr_dtor(&retval);
+    }
+
+    /* Clean up zval strings */
+    zval_ptr_dtor(&args[4]);
+    zval_ptr_dtor(&args[5]);
+}
+
+/* Helper to check if a query is a write operation */
+static int is_write_query(const char *sql) {
+    /* Skip leading whitespace and comments */
+    while (*sql && (*sql == ' ' || *sql == '\t' || *sql == '\n' || *sql == '\r')) {
+        sql++;
+    }
+
+    /* Check for write operations (case-insensitive) */
+    if (strncasecmp(sql, "INSERT", 6) == 0 ||
+        strncasecmp(sql, "CREATE", 6) == 0 ||
+        strncasecmp(sql, "DROP", 4) == 0 ||
+        strncasecmp(sql, "ALTER", 5) == 0 ||
+        strncasecmp(sql, "TRUNCATE", 8) == 0 ||
+        strncasecmp(sql, "RENAME", 6) == 0 ||
+        strncasecmp(sql, "OPTIMIZE", 8) == 0 ||
+        strncasecmp(sql, "SYSTEM", 6) == 0) {
+        return 1;
+    }
+
+    return 0;
 }
 
 /* {{{ proto array ClickHouse\Client::query(string $sql) */
@@ -1607,9 +2396,23 @@ PHP_METHOD(ClickHouse_Client, query) {
         return;
     }
 
+    /* Check read-only mode */
+    if (intern->readonly && is_write_query(sql)) {
+        zend_throw_exception(clickhouse_exception_ce, "Write operations not allowed in read-only mode", 0);
+        return;
+    }
+
     clickhouse_result *result = NULL;
     int status;
     int retry_attempted = 0;
+    double start_time = 0, query_time = 0;
+
+    /* Start timing if metrics are enabled */
+    if (intern->metrics_enabled) {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        start_time = tv.tv_sec + tv.tv_usec / 1000000.0;
+    }
 
 retry_query:
     /* Apply query timeout if set */
@@ -1617,8 +2420,9 @@ retry_query:
         clickhouse_connection_set_query_timeout_ms(intern->conn, (int)intern->query_timeout_ms);
     }
 
-    /* Use extended query when compression, session, query ID, or query settings are set */
-    if (intern->compression != CH_COMPRESS_NONE || intern->session_id || intern->default_query_id || intern->query_settings) {
+    /* Use extended query when compression, session, query ID, query settings, or callbacks are set */
+    if (intern->compression != CH_COMPRESS_NONE || intern->session_id || intern->default_query_id ||
+        intern->query_settings || !Z_ISUNDEF(intern->log_callback)) {
         clickhouse_query_options *opts = clickhouse_query_options_create();
         if (opts) {
             opts->compression = intern->compression;
@@ -1635,6 +2439,11 @@ retry_query:
                     clickhouse_query_options_set_setting(opts, setting->name, setting->value);
                     setting = setting->next;
                 }
+            }
+            /* Set up log callback if present */
+            if (!Z_ISUNDEF(intern->log_callback)) {
+                opts->log_callback = php_log_callback_bridge;
+                opts->log_user_data = intern;
             }
             status = clickhouse_connection_execute_query_ext(intern->conn, sql, opts, &result);
             /* Don't free session_id/query_id as they're borrowed from intern */
@@ -1672,8 +2481,24 @@ retry_query:
         if (result) {
             clickhouse_result_free(result);
         }
-        zend_throw_exception(clickhouse_exception_ce, error ? error : "Query failed", 0);
+        /* Update metrics for failed query */
+        if (intern->metrics_enabled) {
+            struct timeval tv;
+            gettimeofday(&tv, NULL);
+            query_time = (tv.tv_sec + tv.tv_usec / 1000000.0) - start_time;
+            update_query_metrics(intern, query_time, NULL, 0);
+        }
+        /* Use enhanced error message with query context */
+        throw_query_error(error, sql, sql);
         return;
+    }
+
+    /* Calculate query time if metrics enabled */
+    if (intern->metrics_enabled) {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        query_time = (tv.tv_sec + tv.tv_usec / 1000000.0) - start_time;
+        update_query_metrics(intern, query_time, result, 1);
     }
 
     /* Store query ID from result for tracking */
@@ -1683,6 +2508,21 @@ retry_query:
     }
     if (result->query_id) {
         intern->last_query_id = estrdup(result->query_id);
+    }
+
+    /* Call profile callback if set and profile data is available */
+    if (!Z_ISUNDEF(intern->profile_callback)) {
+        zval args[6], retval;
+        ZVAL_LONG(&args[0], result->profile.rows);
+        ZVAL_LONG(&args[1], result->profile.blocks);
+        ZVAL_LONG(&args[2], result->profile.bytes);
+        ZVAL_BOOL(&args[3], result->profile.applied_limit);
+        ZVAL_LONG(&args[4], result->profile.rows_before_limit);
+        ZVAL_BOOL(&args[5], result->profile.calculated_rows_before_limit);
+
+        if (call_user_function(NULL, NULL, &intern->profile_callback, &retval, 6, args) == SUCCESS) {
+            zval_ptr_dtor(&retval);
+        }
     }
 
     result_to_php_array(result, return_value);
@@ -1709,6 +2549,21 @@ PHP_METHOD(ClickHouse_Client, execute) {
         return;
     }
 
+    /* Check read-only mode */
+    if (intern->readonly && is_write_query(sql)) {
+        zend_throw_exception(clickhouse_exception_ce, "Write operations not allowed in read-only mode", 0);
+        return;
+    }
+
+    double start_time = 0, query_time = 0;
+
+    /* Start timing if metrics are enabled */
+    if (intern->metrics_enabled) {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        start_time = tv.tv_sec + tv.tv_usec / 1000000.0;
+    }
+
     /* Build final query with parameter substitution */
     char *final_query = NULL;
     if (params && Z_TYPE_P(params) == IS_ARRAY && zend_hash_num_elements(Z_ARRVAL_P(params)) > 0) {
@@ -1718,14 +2573,45 @@ PHP_METHOD(ClickHouse_Client, execute) {
         zval *val;
         ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(params), key, val) {
             if (key) {
-                zend_string *str_val = zval_get_string(val);
-                clickhouse_params_add(ch_params, ZSTR_VAL(key), ZSTR_VAL(str_val), NULL);
-                zend_string_release(str_val);
+                /* Auto-detect type from PHP value */
+                const char *type = detect_clickhouse_type_from_zval(val);
+                char *str_val;
+
+                /* Handle arrays specially */
+                if (Z_TYPE_P(val) == IS_ARRAY) {
+                    /* Check if it's Array, Map, or JSON type */
+                    if (strncmp(type, "Array", 5) == 0) {
+                        /* Numeric array - serialize to ClickHouse array syntax */
+                        str_val = serialize_php_array_to_clickhouse(val);
+                        clickhouse_params_add(ch_params, ZSTR_VAL(key), str_val, type);
+                        efree(str_val);
+                    } else if (strncmp(type, "Map", 3) == 0) {
+                        /* Map type - serialize to ClickHouse Map syntax */
+                        str_val = serialize_php_map_to_clickhouse(val);
+                        clickhouse_params_add(ch_params, ZSTR_VAL(key), str_val, type);
+                        efree(str_val);
+                    } else {
+                        /* Associative array - JSON encode it */
+                        smart_str json = {0};
+                        php_json_encode(&json, val, PHP_JSON_UNESCAPED_UNICODE | PHP_JSON_UNESCAPED_SLASHES);
+                        smart_str_0(&json);
+                        clickhouse_params_add(ch_params, ZSTR_VAL(key), ZSTR_VAL(json.s), type);
+                        smart_str_free(&json);
+                    }
+                } else {
+                    zend_string *tmp_str = zval_get_string(val);
+                    clickhouse_params_add(ch_params, ZSTR_VAL(key), ZSTR_VAL(tmp_str), type);
+                    zend_string_release(tmp_str);
+                }
             }
         } ZEND_HASH_FOREACH_END();
 
         final_query = substitute_params(sql, ch_params);
         clickhouse_params_free(ch_params);
+        if (!final_query) {
+            /* Error already thrown by substitute_params */
+            return;
+        }
     } else {
         final_query = estrdup(sql);
     }
@@ -1740,8 +2626,9 @@ retry_execute:
         clickhouse_connection_set_query_timeout_ms(intern->conn, (int)intern->query_timeout_ms);
     }
 
-    /* Use extended query when compression, session, query ID, or query settings are set */
-    if (intern->compression != CH_COMPRESS_NONE || intern->session_id || intern->default_query_id || intern->query_settings) {
+    /* Use extended query when compression, session, query ID, query settings, or callbacks are set */
+    if (intern->compression != CH_COMPRESS_NONE || intern->session_id || intern->default_query_id ||
+        intern->query_settings || !Z_ISUNDEF(intern->log_callback)) {
         clickhouse_query_options *opts = clickhouse_query_options_create();
         if (opts) {
             opts->compression = intern->compression;
@@ -1758,6 +2645,11 @@ retry_execute:
                     clickhouse_query_options_set_setting(opts, setting->name, setting->value);
                     setting = setting->next;
                 }
+            }
+            /* Set up log callback if present */
+            if (!Z_ISUNDEF(intern->log_callback)) {
+                opts->log_callback = php_log_callback_bridge;
+                opts->log_user_data = intern;
             }
             status = clickhouse_connection_execute_query_ext(intern->conn, final_query, opts, &result);
             opts->session_id = NULL;
@@ -1791,14 +2683,30 @@ retry_execute:
             }
         }
 
-        efree(final_query);
         if (result) {
             clickhouse_result_free(result);
         }
-        zend_throw_exception(clickhouse_exception_ce, error ? error : "Execute failed", 0);
+        /* Update metrics for failed query */
+        if (intern->metrics_enabled) {
+            struct timeval tv;
+            gettimeofday(&tv, NULL);
+            query_time = (tv.tv_sec + tv.tv_usec / 1000000.0) - start_time;
+            update_query_metrics(intern, query_time, NULL, 0);
+        }
+        /* Use enhanced error message with query context */
+        throw_query_error(error, sql, final_query);
+        efree(final_query);
         return;
     }
     efree(final_query);
+
+    /* Calculate query time if metrics enabled */
+    if (intern->metrics_enabled) {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        query_time = (tv.tv_sec + tv.tv_usec / 1000000.0) - start_time;
+        update_query_metrics(intern, query_time, result, 1);
+    }
 
     /* Store query ID from result for tracking */
     if (intern->last_query_id) {
@@ -1833,6 +2741,290 @@ retry_execute:
         }
         clickhouse_result_free(result);
     }
+}
+/* }}} */
+
+/* {{{ proto array ClickHouse\Client::executeBatch(array $queries [, array $options]) */
+PHP_METHOD(ClickHouse_Client, executeBatch) {
+    zval *queries;
+    zval *options = NULL;
+
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_ARRAY(queries)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY(options)
+    ZEND_PARSE_PARAMETERS_END();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+
+    if (!intern->conn) {
+        zend_throw_exception(clickhouse_exception_ce, "Not connected", 0);
+        return;
+    }
+
+    /* Parse options */
+    zend_bool stop_on_error = 1;  /* Default: stop on first error */
+    zend_bool return_results = 1;  /* Default: return results */
+
+    if (options && Z_TYPE_P(options) == IS_ARRAY) {
+        zval *val;
+        if ((val = zend_hash_str_find(Z_ARRVAL_P(options), "stopOnError", sizeof("stopOnError") - 1)) != NULL) {
+            stop_on_error = zend_is_true(val);
+        }
+        if ((val = zend_hash_str_find(Z_ARRVAL_P(options), "returnResults", sizeof("returnResults") - 1)) != NULL) {
+            return_results = zend_is_true(val);
+        }
+    }
+
+    /* Initialize return array */
+    array_init(return_value);
+
+    /* Iterate through queries */
+    zval *query_item;
+    zend_ulong idx = 0;
+    ZEND_HASH_FOREACH_NUM_KEY_VAL(Z_ARRVAL_P(queries), idx, query_item) {
+        char *sql = NULL;
+        size_t sql_len = 0;
+        zval *params = NULL;
+        zval *settings = NULL;
+
+        /* Parse query item - can be string or array */
+        if (Z_TYPE_P(query_item) == IS_STRING) {
+            /* Simple string query */
+            sql = Z_STRVAL_P(query_item);
+            sql_len = Z_STRLEN_P(query_item);
+        } else if (Z_TYPE_P(query_item) == IS_ARRAY) {
+            /* Query configuration array */
+            zval *tmp;
+            if ((tmp = zend_hash_str_find(Z_ARRVAL_P(query_item), "query", sizeof("query") - 1)) != NULL) {
+                if (Z_TYPE_P(tmp) == IS_STRING) {
+                    sql = Z_STRVAL_P(tmp);
+                    sql_len = Z_STRLEN_P(tmp);
+                }
+            }
+            if ((tmp = zend_hash_str_find(Z_ARRVAL_P(query_item), "params", sizeof("params") - 1)) != NULL) {
+                if (Z_TYPE_P(tmp) == IS_ARRAY) {
+                    params = tmp;
+                }
+            }
+            if ((tmp = zend_hash_str_find(Z_ARRVAL_P(query_item), "settings", sizeof("settings") - 1)) != NULL) {
+                if (Z_TYPE_P(tmp) == IS_ARRAY) {
+                    settings = tmp;
+                }
+            }
+        }
+
+        if (!sql || sql_len == 0) {
+            /* Invalid query item */
+            zval error_result;
+            object_init_ex(&error_result, zend_ce_exception);
+            zend_update_property_string(zend_ce_exception, Z_OBJ_P(&error_result), "message", sizeof("message") - 1, "Invalid query item: missing 'query' field");
+            add_index_zval(return_value, idx, &error_result);
+
+            if (stop_on_error) {
+                zend_throw_exception(clickhouse_exception_ce, "Invalid query item: missing 'query' field", 0);
+                return;
+            }
+            continue;
+        }
+
+        /* Check read-only mode */
+        if (intern->readonly && is_write_query(sql)) {
+            zval error_result;
+            object_init_ex(&error_result, zend_ce_exception);
+            zend_update_property_string(zend_ce_exception, Z_OBJ_P(&error_result), "message", sizeof("message") - 1, "Write operations not allowed in read-only mode");
+            add_index_zval(return_value, idx, &error_result);
+
+            if (stop_on_error) {
+                zend_throw_exception(clickhouse_exception_ce, "Write operations not allowed in read-only mode", 0);
+                return;
+            }
+            continue;
+        }
+
+        /* Build final query with parameter substitution */
+        char *final_query = NULL;
+        if (params && Z_TYPE_P(params) == IS_ARRAY && zend_hash_num_elements(Z_ARRVAL_P(params)) > 0) {
+            clickhouse_params *ch_params = clickhouse_params_create();
+            zend_string *key;
+            zval *val;
+            ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(params), key, val) {
+                if (key) {
+                    /* Auto-detect type from PHP value */
+                    const char *type = detect_clickhouse_type_from_zval(val);
+                    char *str_val;
+
+                    /* Handle arrays specially */
+                    if (Z_TYPE_P(val) == IS_ARRAY) {
+                        /* Check if it's a numeric array (Array type) or associative (JSON/Map) */
+                        if (strncmp(type, "Array", 5) == 0) {
+                            /* Numeric array - serialize to ClickHouse array syntax */
+                            str_val = serialize_php_array_to_clickhouse(val);
+                            clickhouse_params_add(ch_params, ZSTR_VAL(key), str_val, type);
+                            efree(str_val);
+                        } else {
+                            /* Associative array - JSON encode it */
+                            smart_str json = {0};
+                            php_json_encode(&json, val, PHP_JSON_UNESCAPED_UNICODE | PHP_JSON_UNESCAPED_SLASHES);
+                            smart_str_0(&json);
+                            clickhouse_params_add(ch_params, ZSTR_VAL(key), ZSTR_VAL(json.s), type);
+                            smart_str_free(&json);
+                        }
+                    } else {
+                        zend_string *tmp_str = zval_get_string(val);
+                        clickhouse_params_add(ch_params, ZSTR_VAL(key), ZSTR_VAL(tmp_str), type);
+                        zend_string_release(tmp_str);
+                    }
+                }
+            } ZEND_HASH_FOREACH_END();
+
+            final_query = substitute_params(sql, ch_params);
+            clickhouse_params_free(ch_params);
+        } else {
+            final_query = estrdup(sql);
+        }
+
+        /* Apply per-query settings if provided */
+        clickhouse_settings *saved_settings = NULL;
+        if (settings) {
+            /* Save current settings */
+            saved_settings = intern->query_settings;
+            intern->query_settings = NULL;
+
+            /* Apply query-specific settings */
+            zend_string *setting_key;
+            zval *setting_val;
+            ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(settings), setting_key, setting_val) {
+                if (setting_key) {
+                    zend_string *str_val = zval_get_string(setting_val);
+                    if (!intern->query_settings) {
+                        intern->query_settings = clickhouse_settings_create();
+                    }
+                    clickhouse_settings_add(intern->query_settings, ZSTR_VAL(setting_key), ZSTR_VAL(str_val), 0);
+                    zend_string_release(str_val);
+                }
+            } ZEND_HASH_FOREACH_END();
+        }
+
+        /* Execute query */
+        clickhouse_result *result = NULL;
+        int status;
+
+        /* Apply query timeout if set */
+        if (intern->query_timeout_ms > 0) {
+            clickhouse_connection_set_query_timeout_ms(intern->conn, (int)intern->query_timeout_ms);
+        }
+
+        /* Use extended query when compression, session, query ID, query settings, or callbacks are set */
+        if (intern->compression != CH_COMPRESS_NONE || intern->session_id || intern->default_query_id ||
+            intern->query_settings || !Z_ISUNDEF(intern->log_callback)) {
+            clickhouse_query_options *opts = clickhouse_query_options_create();
+            if (opts) {
+                opts->compression = intern->compression;
+                if (intern->session_id) {
+                    opts->session_id = intern->session_id;
+                }
+                if (intern->default_query_id) {
+                    opts->query_id = intern->default_query_id;
+                }
+                /* Copy query settings from client to options */
+                if (intern->query_settings) {
+                    clickhouse_setting *setting = intern->query_settings->head;
+                    while (setting) {
+                        clickhouse_query_options_set_setting(opts, setting->name, setting->value);
+                        setting = setting->next;
+                    }
+                }
+                /* Set up log callback if present */
+                if (!Z_ISUNDEF(intern->log_callback)) {
+                    opts->log_callback = php_log_callback_bridge;
+                    opts->log_user_data = intern;
+                }
+                status = clickhouse_connection_execute_query_ext(intern->conn, final_query, opts, &result);
+                opts->session_id = NULL;
+                opts->query_id = NULL;
+                clickhouse_query_options_free(opts);
+            } else {
+                status = clickhouse_connection_execute_query(intern->conn, final_query, &result);
+            }
+        } else {
+            status = clickhouse_connection_execute_query(intern->conn, final_query, &result);
+        }
+
+        /* Reset timeout to default if it was set */
+        if (intern->query_timeout_ms > 0) {
+            clickhouse_connection_set_query_timeout_ms(intern->conn, 0);
+        }
+
+        /* Restore saved settings if we applied per-query settings */
+        if (settings) {
+            if (intern->query_settings) {
+                clickhouse_settings_free(intern->query_settings);
+            }
+            intern->query_settings = saved_settings;
+        }
+
+        /* Free final query */
+        if (final_query) {
+            efree(final_query);
+        }
+
+        /* Handle result */
+        if (status != 0) {
+            /* Query failed */
+            const char *error = clickhouse_connection_get_error(intern->conn);
+            if (result) {
+                clickhouse_result_free(result);
+            }
+
+            if (stop_on_error) {
+                zend_throw_exception(clickhouse_exception_ce, error ? error : "Query failed", 0);
+                return;
+            } else {
+                /* Store exception object in results array */
+                zval error_result;
+                object_init_ex(&error_result, zend_ce_exception);
+                zend_update_property_string(zend_ce_exception, Z_OBJ_P(&error_result), "message", sizeof("message") - 1, error ? error : "Query failed");
+                add_index_zval(return_value, idx, &error_result);
+            }
+        } else {
+            /* Query succeeded */
+            /* Check if this is a SELECT query (has results) */
+            if (return_results && result && result->block_count > 0) {
+                /* Return result array */
+                zval result_arr;
+                array_init(&result_arr);
+
+                for (size_t block_idx = 0; block_idx < result->block_count; block_idx++) {
+                    clickhouse_block *block = result->blocks[block_idx];
+                    if (!block || block->row_count == 0) continue;
+
+                    for (size_t row = 0; row < block->row_count; row++) {
+                        zval row_arr;
+                        array_init(&row_arr);
+
+                        for (size_t col = 0; col < block->column_count; col++) {
+                            clickhouse_column *column = block->columns[col];
+                            zval value;
+                            column_value_to_zval(column, row, &value);
+                            add_assoc_zval(&row_arr, column->name, &value);
+                        }
+
+                        add_next_index_zval(&result_arr, &row_arr);
+                    }
+                }
+
+                add_index_zval(return_value, idx, &result_arr);
+            } else {
+                /* INSERT/DDL query - return true */
+                add_index_bool(return_value, idx, 1);
+            }
+
+            if (result) {
+                clickhouse_result_free(result);
+            }
+        }
+    } ZEND_HASH_FOREACH_END();
 }
 /* }}} */
 
@@ -1892,15 +3084,30 @@ static int set_column_value(clickhouse_column *col, size_t row, zval *value) {
             data[row] = (int32_t)zval_get_long(value);
             break;
         }
-        case CH_TYPE_INT64: {
+        case CH_TYPE_INT64:
+        case CH_TYPE_INTERVAL_NANOSECOND:
+        case CH_TYPE_INTERVAL_MICROSECOND:
+        case CH_TYPE_INTERVAL_MILLISECOND:
+        case CH_TYPE_INTERVAL_SECOND:
+        case CH_TYPE_INTERVAL_MINUTE:
+        case CH_TYPE_INTERVAL_HOUR:
+        case CH_TYPE_INTERVAL_DAY:
+        case CH_TYPE_INTERVAL_WEEK:
+        case CH_TYPE_INTERVAL_MONTH:
+        case CH_TYPE_INTERVAL_QUARTER:
+        case CH_TYPE_INTERVAL_YEAR: {
             int64_t *data = (int64_t *)col->data;
             data[row] = (int64_t)zval_get_long(value);
             break;
         }
-        case CH_TYPE_UINT8:
-        case CH_TYPE_BOOL: {
+        case CH_TYPE_UINT8: {
             uint8_t *data = (uint8_t *)col->data;
             data[row] = (uint8_t)zval_get_long(value);
+            break;
+        }
+        case CH_TYPE_BOOL: {
+            uint8_t *data = (uint8_t *)col->data;
+            data[row] = zval_is_true(value) ? 1 : 0;
             break;
         }
         case CH_TYPE_UINT16: {
@@ -1926,6 +3133,15 @@ static int set_column_value(clickhouse_column *col, size_t row, zval *value) {
         case CH_TYPE_FLOAT64: {
             double *data = (double *)col->data;
             data[row] = zval_get_double(value);
+            break;
+        }
+        case CH_TYPE_BFLOAT16: {
+            /* BFloat16: convert double to 16-bit brain float */
+            uint16_t *data = (uint16_t *)col->data;
+            float f = (float)zval_get_double(value);
+            uint32_t as_uint32;
+            memcpy(&as_uint32, &f, sizeof(float));
+            data[row] = (uint16_t)(as_uint32 >> 16);
             break;
         }
         case CH_TYPE_STRING: {
@@ -2029,20 +3245,29 @@ static int set_column_value(clickhouse_column *col, size_t row, zval *value) {
         }
         case CH_TYPE_DECIMAL32: {
             int32_t *data = (int32_t *)col->data;
+            size_t scale = col->type ? col->type->fixed_size : 0;
+            double multiplier = 1.0;
+            for (size_t i = 0; i < scale; i++) multiplier *= 10.0;
             if (Z_TYPE_P(value) == IS_DOUBLE) {
-                /* TODO: proper decimal scaling based on type precision */
-                data[row] = (int32_t)Z_DVAL_P(value);
+                data[row] = (int32_t)(Z_DVAL_P(value) * multiplier);
+            } else if (Z_TYPE_P(value) == IS_STRING) {
+                data[row] = (int32_t)(zval_get_double(value) * multiplier);
             } else {
-                data[row] = (int32_t)zval_get_long(value);
+                data[row] = (int32_t)(zval_get_long(value) * (int64_t)multiplier);
             }
             break;
         }
         case CH_TYPE_DECIMAL64: {
             int64_t *data = (int64_t *)col->data;
+            size_t scale = col->type ? col->type->fixed_size : 0;
+            double multiplier = 1.0;
+            for (size_t i = 0; i < scale; i++) multiplier *= 10.0;
             if (Z_TYPE_P(value) == IS_DOUBLE) {
-                data[row] = (int64_t)Z_DVAL_P(value);
+                data[row] = (int64_t)(Z_DVAL_P(value) * multiplier);
+            } else if (Z_TYPE_P(value) == IS_STRING) {
+                data[row] = (int64_t)(zval_get_double(value) * multiplier);
             } else {
-                data[row] = (int64_t)zval_get_long(value);
+                data[row] = (int64_t)(zval_get_long(value) * (int64_t)multiplier);
             }
             break;
         }
@@ -2079,6 +3304,12 @@ PHP_METHOD(ClickHouse_Client, insert) {
 
     if (!intern->conn) {
         zend_throw_exception(clickhouse_exception_ce, "Not connected", 0);
+        return;
+    }
+
+    /* Check read-only mode */
+    if (intern->readonly) {
+        zend_throw_exception(clickhouse_exception_ce, "Insert operations not allowed in read-only mode", 0);
         return;
     }
 
@@ -2153,50 +3384,98 @@ PHP_METHOD(ClickHouse_Client, insert) {
             }
 
             case CH_SERVER_PROGRESS: {
-                /* Skip progress info: rows, bytes, total_rows, written_rows, written_bytes */
-                uint64_t dummy;
-                clickhouse_buffer_read_varint(intern->conn->read_buf, &dummy); /* rows */
-                clickhouse_buffer_read_varint(intern->conn->read_buf, &dummy); /* bytes */
-                clickhouse_buffer_read_varint(intern->conn->read_buf, &dummy); /* total_rows */
-                clickhouse_buffer_read_varint(intern->conn->read_buf, &dummy); /* written_rows */
-                clickhouse_buffer_read_varint(intern->conn->read_buf, &dummy); /* written_bytes */
+                /* Read progress info */
+                uint64_t progress_rows, progress_bytes, progress_total_rows, progress_written_rows, progress_written_bytes;
+                clickhouse_buffer_read_varint(intern->conn->read_buf, &progress_rows);
+                clickhouse_buffer_read_varint(intern->conn->read_buf, &progress_bytes);
+                clickhouse_buffer_read_varint(intern->conn->read_buf, &progress_total_rows);
+                clickhouse_buffer_read_varint(intern->conn->read_buf, &progress_written_rows);
+                clickhouse_buffer_read_varint(intern->conn->read_buf, &progress_written_bytes);
+
+                /* Call progress callback if set */
+                if (!Z_ISUNDEF(intern->progress_callback)) {
+                    zval args[5], retval;
+                    ZVAL_LONG(&args[0], progress_rows);
+                    ZVAL_LONG(&args[1], progress_bytes);
+                    ZVAL_LONG(&args[2], progress_total_rows);
+                    ZVAL_LONG(&args[3], progress_written_rows);
+                    ZVAL_LONG(&args[4], progress_written_bytes);
+
+                    if (call_user_function(NULL, NULL, &intern->progress_callback, &retval, 5, args) == SUCCESS) {
+                        zval_ptr_dtor(&retval);
+                    }
+                }
                 break;
             }
 
             case CH_SERVER_TABLE_COLUMNS: {
-                /* Skip TableColumns: external_table_name, columns_description */
-                char *str;
-                size_t str_len;
-                clickhouse_buffer_read_string(intern->conn->read_buf, &str, &str_len);
-                free(str);
-                clickhouse_buffer_read_string(intern->conn->read_buf, &str, &str_len);
-                free(str);
+                /* Skip TableColumns: table_name (string) + column_descriptions (block) */
+                char *table_name;
+                size_t table_name_len;
+                if (clickhouse_buffer_read_string(intern->conn->read_buf, &table_name, &table_name_len) == 0) {
+                    free(table_name);
+                    /* Read and discard the columns block */
+                    clickhouse_block *columns_block = clickhouse_block_create();
+                    if (columns_block) {
+                        clickhouse_block_read(intern->conn->read_buf, columns_block);
+                        clickhouse_block_free(columns_block);
+                    }
+                }
                 break;
             }
 
             case CH_SERVER_PROFILE_INFO: {
-                /* Skip profile info */
-                uint64_t dummy;
-                uint8_t dummy8;
-                clickhouse_buffer_read_varint(intern->conn->read_buf, &dummy); /* rows */
-                clickhouse_buffer_read_varint(intern->conn->read_buf, &dummy); /* blocks */
-                clickhouse_buffer_read_varint(intern->conn->read_buf, &dummy); /* bytes */
-                clickhouse_buffer_read_bytes(intern->conn->read_buf, &dummy8, 1); /* applied_limit */
-                clickhouse_buffer_read_varint(intern->conn->read_buf, &dummy); /* rows_before_limit */
-                clickhouse_buffer_read_bytes(intern->conn->read_buf, &dummy8, 1); /* calculated_rows_before_limit */
+                /* Read profile info */
+                uint64_t profile_rows, profile_blocks, profile_bytes, profile_rows_before_limit;
+                uint8_t profile_applied_limit, profile_calculated_rows_before_limit;
+                clickhouse_buffer_read_varint(intern->conn->read_buf, &profile_rows);
+                clickhouse_buffer_read_varint(intern->conn->read_buf, &profile_blocks);
+                clickhouse_buffer_read_varint(intern->conn->read_buf, &profile_bytes);
+                clickhouse_buffer_read_bytes(intern->conn->read_buf, &profile_applied_limit, 1);
+                clickhouse_buffer_read_varint(intern->conn->read_buf, &profile_rows_before_limit);
+                clickhouse_buffer_read_bytes(intern->conn->read_buf, &profile_calculated_rows_before_limit, 1);
+
+                /* Call profile callback if set */
+                if (!Z_ISUNDEF(intern->profile_callback)) {
+                    zval args[6], retval;
+                    ZVAL_LONG(&args[0], profile_rows);
+                    ZVAL_LONG(&args[1], profile_blocks);
+                    ZVAL_LONG(&args[2], profile_bytes);
+                    ZVAL_BOOL(&args[3], profile_applied_limit);
+                    ZVAL_LONG(&args[4], profile_rows_before_limit);
+                    ZVAL_BOOL(&args[5], profile_calculated_rows_before_limit);
+
+                    if (call_user_function(NULL, NULL, &intern->profile_callback, &retval, 6, args) == SUCCESS) {
+                        zval_ptr_dtor(&retval);
+                    }
+                }
                 break;
             }
 
             case CH_SERVER_LOG: {
-                /* Skip log block: skip the log block entirely */
-                char *str;
-                size_t str_len;
-                clickhouse_buffer_read_string(intern->conn->read_buf, &str, &str_len);
-                free(str);
-                /* Read and discard the log block */
-                clickhouse_block *log_block = clickhouse_block_create();
-                clickhouse_block_read(intern->conn->read_buf, log_block);
-                clickhouse_block_free(log_block);
+                /* Read and handle log entry */
+                clickhouse_log_entry *log_entry = clickhouse_log_entry_read(intern->conn->read_buf);
+                if (log_entry) {
+                    /* Call log callback if set */
+                    if (!Z_ISUNDEF(intern->log_callback)) {
+                        zval args[6], retval;
+                        ZVAL_LONG(&args[0], log_entry->time);
+                        ZVAL_LONG(&args[1], log_entry->time_microseconds);
+                        ZVAL_LONG(&args[2], log_entry->thread_id);
+                        ZVAL_LONG(&args[3], log_entry->priority);
+                        ZVAL_STRING(&args[4], log_entry->source ? log_entry->source : "");
+                        ZVAL_STRING(&args[5], log_entry->text ? log_entry->text : "");
+
+                        if (call_user_function(NULL, NULL, &intern->log_callback, &retval, 6, args) == SUCCESS) {
+                            zval_ptr_dtor(&retval);
+                        }
+
+                        /* Clean up zval strings */
+                        zval_ptr_dtor(&args[4]);
+                        zval_ptr_dtor(&args[5]);
+                    }
+                    clickhouse_log_entry_free(log_entry);
+                }
                 break;
             }
 
@@ -2358,6 +3637,85 @@ PHP_METHOD(ClickHouse_Client, isConnected) {
 
     clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
     RETURN_BOOL(intern->conn != NULL && intern->conn->socket_fd >= 0);
+}
+/* }}} */
+
+/* {{{ proto void ClickHouse\Client::insertFromString(string $table, string $data [, string $format])
+   Insert raw formatted data (CSV, TSV, JSONEachRow, etc.) from a string */
+PHP_METHOD(ClickHouse_Client, insertFromString) {
+    char *table, *data, *format = "CSV";
+    size_t table_len, data_len, format_len = 3;
+
+    ZEND_PARSE_PARAMETERS_START(2, 3)
+        Z_PARAM_STRING(table, table_len)
+        Z_PARAM_STRING(data, data_len)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STRING(format, format_len)
+    ZEND_PARSE_PARAMETERS_END();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+
+    if (!intern->conn) {
+        zend_throw_exception(clickhouse_exception_ce, "Not connected", 0);
+        return;
+    }
+
+    int status = clickhouse_connection_insert_format_data(intern->conn, table, format, data, data_len);
+
+    if (status != 0) {
+        const char *error = clickhouse_connection_get_error(intern->conn);
+        zend_throw_exception(clickhouse_exception_ce, error ? error : "Insert failed", 0);
+        return;
+    }
+}
+/* }}} */
+
+/* {{{ proto void ClickHouse\Client::insertFromFile(string $table, string $filepath [, string $format])
+   Insert raw formatted data (CSV, TSV, JSONEachRow, etc.) from a file */
+PHP_METHOD(ClickHouse_Client, insertFromFile) {
+    char *table, *filepath, *format = "CSV";
+    size_t table_len, filepath_len, format_len = 3;
+
+    ZEND_PARSE_PARAMETERS_START(2, 3)
+        Z_PARAM_STRING(table, table_len)
+        Z_PARAM_STRING(filepath, filepath_len)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STRING(format, format_len)
+    ZEND_PARSE_PARAMETERS_END();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+
+    if (!intern->conn) {
+        zend_throw_exception(clickhouse_exception_ce, "Not connected", 0);
+        return;
+    }
+
+    /* Read file contents */
+    php_stream *stream = php_stream_open_wrapper(filepath, "rb", REPORT_ERRORS, NULL);
+    if (!stream) {
+        zend_throw_exception(clickhouse_exception_ce, "Failed to open file", 0);
+        return;
+    }
+
+    zend_string *contents = php_stream_copy_to_mem(stream, PHP_STREAM_COPY_ALL, 0);
+    php_stream_close(stream);
+
+    if (!contents || ZSTR_LEN(contents) == 0) {
+        if (contents) {
+            zend_string_release(contents);
+        }
+        zend_throw_exception(clickhouse_exception_ce, "File is empty or unreadable", 0);
+        return;
+    }
+
+    int status = clickhouse_connection_insert_format_data(intern->conn, table, format, ZSTR_VAL(contents), ZSTR_LEN(contents));
+    zend_string_release(contents);
+
+    if (status != 0) {
+        const char *error = clickhouse_connection_get_error(intern->conn);
+        zend_throw_exception(clickhouse_exception_ce, error ? error : "Insert failed", 0);
+        return;
+    }
 }
 /* }}} */
 
@@ -2620,6 +3978,288 @@ PHP_METHOD(ClickHouse_Client, getCompression) {
 
     clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
     RETURN_LONG(intern->compression);
+}
+/* }}} */
+
+/* {{{ proto void ClickHouse\Client::setProgressCallback(?callable $callback)
+   Set callback for progress updates during query execution.
+   Callback receives: (int $rows, int $bytes, int $total_rows, int $written_rows, int $written_bytes) */
+PHP_METHOD(ClickHouse_Client, setProgressCallback) {
+    zend_fcall_info fci;
+    zend_fcall_info_cache fcc;
+    zend_bool callback_is_null = 0;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_FUNC_EX(fci, fcc, 1, 0)
+    ZEND_PARSE_PARAMETERS_END();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+
+    /* Clear existing callback */
+    if (!Z_ISUNDEF(intern->progress_callback)) {
+        zval_ptr_dtor(&intern->progress_callback);
+        ZVAL_UNDEF(&intern->progress_callback);
+    }
+
+    /* Set new callback if provided */
+    if (ZEND_FCI_INITIALIZED(fci)) {
+        ZVAL_COPY(&intern->progress_callback, &fci.function_name);
+    }
+}
+/* }}} */
+
+/* {{{ proto void ClickHouse\Client::setProfileCallback(?callable $callback)
+   Set callback for profile info events during query execution.
+   Callback receives: (int $rows, int $blocks, int $bytes, bool $applied_limit, int $rows_before_limit, bool $calculated_rows_before_limit) */
+PHP_METHOD(ClickHouse_Client, setProfileCallback) {
+    zend_fcall_info fci;
+    zend_fcall_info_cache fcc;
+    zend_bool callback_is_null = 0;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_FUNC_EX(fci, fcc, 1, 0)
+    ZEND_PARSE_PARAMETERS_END();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+
+    /* Clear existing callback */
+    if (!Z_ISUNDEF(intern->profile_callback)) {
+        zval_ptr_dtor(&intern->profile_callback);
+        ZVAL_UNDEF(&intern->profile_callback);
+    }
+
+    /* Set new callback if provided */
+    if (ZEND_FCI_INITIALIZED(fci)) {
+        ZVAL_COPY(&intern->profile_callback, &fci.function_name);
+    }
+}
+/* }}} */
+
+/* {{{ proto void ClickHouse\Client::setLogCallback(?callable $callback)
+   Set callback for server log messages during query execution.
+   Callback receives: (int $timestamp, int $microseconds, int $thread_id, int $level, string $source, string $text) */
+PHP_METHOD(ClickHouse_Client, setLogCallback) {
+    zend_fcall_info fci;
+    zend_fcall_info_cache fcc;
+    zend_bool callback_is_null = 0;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_FUNC_EX(fci, fcc, 1, 0)
+    ZEND_PARSE_PARAMETERS_END();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+
+    /* Clear existing callback */
+    if (!Z_ISUNDEF(intern->log_callback)) {
+        zval_ptr_dtor(&intern->log_callback);
+        ZVAL_UNDEF(&intern->log_callback);
+    }
+
+    /* Set new callback if provided */
+    if (ZEND_FCI_INITIALIZED(fci)) {
+        ZVAL_COPY(&intern->log_callback, &fci.function_name);
+    }
+}
+/* }}} */
+
+/* {{{ proto void ClickHouse\Client::setReadOnly(bool $readonly)
+   Enable or disable read-only mode. When enabled, prevents execution of write operations. */
+PHP_METHOD(ClickHouse_Client, setReadOnly) {
+    zend_bool readonly;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_BOOL(readonly)
+    ZEND_PARSE_PARAMETERS_END();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+    intern->readonly = readonly;
+}
+/* }}} */
+
+/* {{{ proto bool ClickHouse\Client::isReadOnly()
+   Check if read-only mode is enabled. */
+PHP_METHOD(ClickHouse_Client, isReadOnly) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+    RETURN_BOOL(intern->readonly);
+}
+/* }}} */
+
+/* {{{ proto bool ClickHouse\Client::beginTransaction()
+   Begin a transaction (EXPERIMENTAL - requires Atomic database engine) */
+PHP_METHOD(ClickHouse_Client, beginTransaction) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+
+    if (!intern->conn) {
+        zend_throw_exception(clickhouse_exception_ce, "Not connected", 0);
+        RETURN_FALSE;
+    }
+
+    if (intern->in_transaction) {
+        zend_throw_exception(clickhouse_exception_ce, "Transaction already active", 0);
+        RETURN_FALSE;
+    }
+
+    /* ClickHouse transactions use sessions - ensure we have a session ID */
+    if (!intern->session_id) {
+        /* Generate a session ID for transaction isolation */
+        char session_buf[64];
+        snprintf(session_buf, sizeof(session_buf), "tx_%ld_%d", (long)time(NULL), rand());
+        intern->session_id = estrdup(session_buf);
+    }
+
+    /* ClickHouse BEGIN TRANSACTION syntax */
+    clickhouse_result *result = NULL;
+    clickhouse_query_options *opts = clickhouse_query_options_create();
+    if (!opts) {
+        zend_throw_exception(clickhouse_exception_ce, "Failed to create query options", 0);
+        RETURN_FALSE;
+    }
+
+    opts->session_id = intern->session_id;
+    opts->compression = intern->compression;
+
+    int status = clickhouse_connection_execute_query_ext(intern->conn, "BEGIN TRANSACTION", opts, &result);
+
+    opts->session_id = NULL;
+    clickhouse_query_options_free(opts);
+
+    if (status != 0) {
+        const char *error = clickhouse_connection_get_error(intern->conn);
+        if (result) clickhouse_result_free(result);
+
+        char err_msg[512];
+        snprintf(err_msg, sizeof(err_msg),
+                "Failed to begin transaction: %s. "
+                "Note: Transactions require ClickHouse 21.11+ with Atomic database engine "
+                "and compatible table engines (e.g., ReplicatedMergeTree). "
+                "This feature is EXPERIMENTAL.",
+                error ? error : "Unknown error");
+        zend_throw_exception(clickhouse_exception_ce, err_msg, 0);
+        RETURN_FALSE;
+    }
+
+    if (result) clickhouse_result_free(result);
+
+    intern->in_transaction = 1;
+    RETURN_TRUE;
+}
+/* }}} */
+
+/* {{{ proto bool ClickHouse\Client::commit()
+   Commit the current transaction (EXPERIMENTAL) */
+PHP_METHOD(ClickHouse_Client, commit) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+
+    if (!intern->conn) {
+        zend_throw_exception(clickhouse_exception_ce, "Not connected", 0);
+        RETURN_FALSE;
+    }
+
+    if (!intern->in_transaction) {
+        zend_throw_exception(clickhouse_exception_ce, "No active transaction", 0);
+        RETURN_FALSE;
+    }
+
+    /* ClickHouse COMMIT syntax */
+    clickhouse_result *result = NULL;
+    clickhouse_query_options *opts = clickhouse_query_options_create();
+    if (!opts) {
+        zend_throw_exception(clickhouse_exception_ce, "Failed to create query options", 0);
+        RETURN_FALSE;
+    }
+
+    opts->session_id = intern->session_id;
+    opts->compression = intern->compression;
+
+    int status = clickhouse_connection_execute_query_ext(intern->conn, "COMMIT", opts, &result);
+
+    opts->session_id = NULL;
+    clickhouse_query_options_free(opts);
+
+    if (status != 0) {
+        const char *error = clickhouse_connection_get_error(intern->conn);
+        if (result) clickhouse_result_free(result);
+
+        char err_msg[256];
+        snprintf(err_msg, sizeof(err_msg),
+                "Failed to commit transaction: %s",
+                error ? error : "Unknown error");
+        zend_throw_exception(clickhouse_exception_ce, err_msg, 0);
+        RETURN_FALSE;
+    }
+
+    if (result) clickhouse_result_free(result);
+
+    intern->in_transaction = 0;
+    RETURN_TRUE;
+}
+/* }}} */
+
+/* {{{ proto bool ClickHouse\Client::rollback()
+   Rollback the current transaction (EXPERIMENTAL) */
+PHP_METHOD(ClickHouse_Client, rollback) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+
+    if (!intern->conn) {
+        zend_throw_exception(clickhouse_exception_ce, "Not connected", 0);
+        RETURN_FALSE;
+    }
+
+    if (!intern->in_transaction) {
+        zend_throw_exception(clickhouse_exception_ce, "No active transaction", 0);
+        RETURN_FALSE;
+    }
+
+    /* ClickHouse ROLLBACK syntax */
+    clickhouse_result *result = NULL;
+    clickhouse_query_options *opts = clickhouse_query_options_create();
+    if (!opts) {
+        zend_throw_exception(clickhouse_exception_ce, "Failed to create query options", 0);
+        RETURN_FALSE;
+    }
+
+    opts->session_id = intern->session_id;
+    opts->compression = intern->compression;
+
+    int status = clickhouse_connection_execute_query_ext(intern->conn, "ROLLBACK", opts, &result);
+
+    opts->session_id = NULL;
+    clickhouse_query_options_free(opts);
+
+    if (status != 0) {
+        const char *error = clickhouse_connection_get_error(intern->conn);
+        if (result) clickhouse_result_free(result);
+
+        char err_msg[256];
+        snprintf(err_msg, sizeof(err_msg),
+                "Failed to rollback transaction: %s",
+                error ? error : "Unknown error");
+        zend_throw_exception(clickhouse_exception_ce, err_msg, 0);
+        RETURN_FALSE;
+    }
+
+    if (result) clickhouse_result_free(result);
+
+    intern->in_transaction = 0;
+    RETURN_TRUE;
+}
+/* }}} */
+
+/* {{{ proto bool ClickHouse\Client::inTransaction()
+   Check if currently in a transaction */
+PHP_METHOD(ClickHouse_Client, inTransaction) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+    RETURN_BOOL(intern->in_transaction);
 }
 /* }}} */
 
@@ -2926,6 +4566,117 @@ PHP_METHOD(ClickHouse_Client, cancel) {
 }
 /* }}} */
 
+/* {{{ proto ClickHouse\Client ClickHouse\Client::fromDSN(string $dsn)
+   Create a client from a DSN string.
+   Format: clickhouse://[user[:password]@]host[:port][/database][?options]
+   Options: ssl=1, compression=lz4|zstd|none, connect_timeout=N, read_timeout=N */
+PHP_METHOD(ClickHouse_Client, fromDSN) {
+    char *dsn;
+    size_t dsn_len;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(dsn, dsn_len)
+    ZEND_PARSE_PARAMETERS_END();
+
+    /* Parse the URL */
+    php_url *url = php_url_parse_ex(dsn, dsn_len);
+    if (!url) {
+        zend_throw_exception(clickhouse_exception_ce, "Invalid DSN format", 0);
+        return;
+    }
+
+    /* Validate scheme */
+    if (!url->scheme || (strcmp(ZSTR_VAL(url->scheme), "clickhouse") != 0 &&
+                          strcmp(ZSTR_VAL(url->scheme), "ch") != 0)) {
+        php_url_free(url);
+        zend_throw_exception(clickhouse_exception_ce,
+            "DSN must start with clickhouse:// or ch://", 0);
+        return;
+    }
+
+    /* Extract components */
+    const char *host = url->host ? ZSTR_VAL(url->host) : "localhost";
+    zend_long port = url->port ? url->port : 9000;
+    const char *user = url->user ? ZSTR_VAL(url->user) : "default";
+    const char *password = url->pass ? ZSTR_VAL(url->pass) : "";
+    const char *database = "default";
+
+    /* Extract database from path (skip leading /) */
+    if (url->path && ZSTR_LEN(url->path) > 1) {
+        database = ZSTR_VAL(url->path) + 1;
+    }
+
+    /* Create new Client object */
+    object_init_ex(return_value, clickhouse_client_ce);
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(return_value);
+
+    /* Create connection */
+    intern->conn = clickhouse_connection_create(host, (uint16_t)port, user, password, database);
+    if (!intern->conn) {
+        php_url_free(url);
+        zend_throw_exception(clickhouse_exception_ce, "Failed to create connection", 0);
+        return;
+    }
+
+    /* Save connection parameters for potential reconnection */
+    intern->saved_host = estrdup(host);
+    intern->saved_port = (uint16_t)port;
+    intern->saved_user = estrdup(user);
+    intern->saved_password = estrdup(password);
+    intern->saved_database = estrdup(database);
+
+    /* Parse query string options */
+    if (url->query && ZSTR_LEN(url->query) > 0) {
+        char *query_str = estrdup(ZSTR_VAL(url->query));
+        char *token, *saveptr;
+
+        token = strtok_r(query_str, "&", &saveptr);
+        while (token) {
+            char *eq = strchr(token, '=');
+            if (eq) {
+                *eq = '\0';
+                char *key = token;
+                char *value = eq + 1;
+
+                if (strcmp(key, "ssl") == 0) {
+                    if (strcmp(value, "1") == 0 || strcmp(value, "true") == 0) {
+                        clickhouse_connection_set_ssl_enabled(intern->conn, 1);
+                    }
+                } else if (strcmp(key, "compression") == 0) {
+                    if (strcmp(value, "lz4") == 0) {
+                        intern->compression = 1;  /* CH_COMPRESS_LZ4 */
+                    } else if (strcmp(value, "zstd") == 0) {
+                        intern->compression = 2;  /* CH_COMPRESS_ZSTD */
+                    } else if (strcmp(value, "none") == 0) {
+                        intern->compression = 0;
+                    }
+                } else if (strcmp(key, "connect_timeout") == 0) {
+                    clickhouse_connection_set_connect_timeout(intern->conn, atoi(value));
+                } else if (strcmp(key, "read_timeout") == 0) {
+                    clickhouse_connection_set_read_timeout(intern->conn, atoi(value));
+                } else if (strcmp(key, "write_timeout") == 0) {
+                    clickhouse_connection_set_write_timeout(intern->conn, atoi(value));
+                }
+            }
+            token = strtok_r(NULL, "&", &saveptr);
+        }
+        efree(query_str);
+    }
+
+    php_url_free(url);
+
+    /* Connect */
+    if (clickhouse_connection_connect(intern->conn) != 0) {
+        const char *error = clickhouse_connection_get_error(intern->conn);
+        zend_throw_exception(clickhouse_exception_ce,
+            error ? error : "Failed to connect", 0);
+        return;
+    }
+
+    CLICKHOUSE_G(num_links)++;
+}
+/* }}} */
+
 /* {{{ proto void ClickHouse\Client::setSession(?string $session_id)
    Set the session ID for stateful queries */
 PHP_METHOD(ClickHouse_Client, setSession) {
@@ -3033,6 +4784,120 @@ PHP_METHOD(ClickHouse_Client, getAutoReconnect) {
 }
 /* }}} */
 
+/* {{{ proto void ClickHouse\Client::setMaxRetryAttempts(int $max_attempts)
+   Set maximum retry attempts for reconnection (0 = use default) */
+PHP_METHOD(ClickHouse_Client, setMaxRetryAttempts) {
+    zend_long max_attempts;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(max_attempts)
+    ZEND_PARSE_PARAMETERS_END();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+
+    if (max_attempts < 0) {
+        zend_throw_exception(clickhouse_exception_ce, "Max retry attempts must be >= 0", 0);
+        return;
+    }
+
+    intern->max_retry_attempts = max_attempts;
+}
+/* }}} */
+
+/* {{{ proto int ClickHouse\Client::getMaxRetryAttempts()
+   Get maximum retry attempts setting */
+PHP_METHOD(ClickHouse_Client, getMaxRetryAttempts) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+    RETURN_LONG(intern->max_retry_attempts);
+}
+/* }}} */
+
+/* {{{ proto void ClickHouse\Client::setRetryDelay(float $base_delay, float $max_delay)
+   Set retry delay configuration (base delay and max delay in seconds) */
+PHP_METHOD(ClickHouse_Client, setRetryDelay) {
+    double base_delay, max_delay;
+
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_DOUBLE(base_delay)
+        Z_PARAM_DOUBLE(max_delay)
+    ZEND_PARSE_PARAMETERS_END();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+
+    if (base_delay < 0 || max_delay < 0) {
+        zend_throw_exception(clickhouse_exception_ce, "Retry delays must be >= 0", 0);
+        return;
+    }
+
+    if (base_delay > max_delay) {
+        zend_throw_exception(clickhouse_exception_ce, "Base delay cannot exceed max delay", 0);
+        return;
+    }
+
+    intern->retry_base_delay = base_delay;
+    intern->retry_max_delay = max_delay;
+}
+/* }}} */
+
+/* {{{ proto array ClickHouse\Client::getRetryDelay()
+   Get retry delay configuration */
+PHP_METHOD(ClickHouse_Client, getRetryDelay) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+
+    array_init(return_value);
+    add_assoc_double(return_value, "base_delay", intern->retry_base_delay);
+    add_assoc_double(return_value, "max_delay", intern->retry_max_delay);
+}
+/* }}} */
+
+/* {{{ proto void ClickHouse\Client::setRetryJitter(bool $enabled)
+   Enable or disable jitter in retry delays */
+PHP_METHOD(ClickHouse_Client, setRetryJitter) {
+    zend_bool enabled;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_BOOL(enabled)
+    ZEND_PARSE_PARAMETERS_END();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+    intern->retry_jitter = enabled;
+}
+/* }}} */
+
+/* {{{ proto bool ClickHouse\Client::getRetryJitter()
+   Get retry jitter setting */
+PHP_METHOD(ClickHouse_Client, getRetryJitter) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+    RETURN_BOOL(intern->retry_jitter);
+}
+/* }}} */
+
+/* {{{ proto int ClickHouse\Client::getTotalRetryAttempts()
+   Get total number of retry attempts made (for metrics) */
+PHP_METHOD(ClickHouse_Client, getTotalRetryAttempts) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+    RETURN_LONG(intern->total_retry_attempts);
+}
+/* }}} */
+
+/* {{{ proto void ClickHouse\Client::resetRetryMetrics()
+   Reset retry attempt counter */
+PHP_METHOD(ClickHouse_Client, resetRetryMetrics) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+    intern->total_retry_attempts = 0;
+}
+/* }}} */
+
 /* {{{ proto void ClickHouse\Client::setQueryId(?string $query_id)
    Set the default query ID prefix */
 PHP_METHOD(ClickHouse_Client, setQueryId) {
@@ -3083,6 +4948,88 @@ PHP_METHOD(ClickHouse_Client, getLastQueryId) {
         RETURN_STRING(intern->last_query_id);
     }
     RETURN_NULL();
+}
+/* }}} */
+
+/* {{{ proto void ClickHouse\Client::enableMetrics()
+   Enable query metrics collection */
+PHP_METHOD(ClickHouse_Client, enableMetrics) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+    intern->metrics_enabled = 1;
+}
+/* }}} */
+
+/* {{{ proto void ClickHouse\Client::disableMetrics()
+   Disable query metrics collection */
+PHP_METHOD(ClickHouse_Client, disableMetrics) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+    intern->metrics_enabled = 0;
+}
+/* }}} */
+
+/* {{{ proto array ClickHouse\Client::getMetrics()
+   Get collected query metrics */
+PHP_METHOD(ClickHouse_Client, getMetrics) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+
+    array_init(return_value);
+    add_assoc_bool(return_value, "enabled", intern->metrics_enabled);
+    add_assoc_long(return_value, "queries_executed", intern->queries_executed);
+    add_assoc_long(return_value, "queries_failed", intern->queries_failed);
+    add_assoc_double(return_value, "total_query_time", intern->total_query_time);
+    add_assoc_long(return_value, "total_rows_read", intern->total_rows_read);
+    add_assoc_long(return_value, "total_bytes_read", intern->total_bytes_read);
+    add_assoc_long(return_value, "slow_queries", intern->slow_queries);
+    add_assoc_double(return_value, "slow_query_threshold", intern->slow_query_threshold);
+
+    /* Calculate average query time if we have executed queries */
+    if (intern->queries_executed > 0) {
+        add_assoc_double(return_value, "avg_query_time", intern->total_query_time / intern->queries_executed);
+    } else {
+        add_assoc_double(return_value, "avg_query_time", 0.0);
+    }
+}
+/* }}} */
+
+/* {{{ proto void ClickHouse\Client::resetMetrics()
+   Reset all query metrics counters */
+PHP_METHOD(ClickHouse_Client, resetMetrics) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+
+    intern->queries_executed = 0;
+    intern->queries_failed = 0;
+    intern->total_query_time = 0.0;
+    intern->total_rows_read = 0;
+    intern->total_bytes_read = 0;
+    intern->slow_queries = 0;
+}
+/* }}} */
+
+/* {{{ proto void ClickHouse\Client::setSlowQueryThreshold(float $seconds)
+   Set the threshold in seconds for slow query detection (0 to disable) */
+PHP_METHOD(ClickHouse_Client, setSlowQueryThreshold) {
+    double threshold;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_DOUBLE(threshold)
+    ZEND_PARSE_PARAMETERS_END();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+
+    if (threshold < 0) {
+        zend_throw_exception(clickhouse_exception_ce, "Slow query threshold must be >= 0", 0);
+        return;
+    }
+
+    intern->slow_query_threshold = threshold;
 }
 /* }}} */
 
@@ -3452,62 +5399,117 @@ static char *substitute_params(const char *query, clickhouse_params *params) {
 
     smart_str result = {0};
     const char *p = query;
+    size_t position = 0;  /* Track position in original query */
 
     while (*p) {
+        /* Only support {param} and {param:Type} ClickHouse-native syntax */
         if (*p == '{') {
-            /* Look for {name:Type} pattern */
             const char *start = p + 1;
             const char *colon = NULL;
             const char *end = NULL;
+            size_t param_start_pos = position;  /* Remember where parameter started */
 
+            /* {param} or {param:Type} style */
             for (const char *c = start; *c && *c != '}'; c++) {
                 if (*c == ':') colon = c;
             }
             if (*start) {
                 for (end = start; *end && *end != '}'; end++);
             }
-
-            if (colon && end && *end == '}') {
-                /* Extract parameter name */
-                size_t name_len = colon - start;
-                char *name = estrndup(start, name_len);
-
-                /* Look up parameter */
-                clickhouse_param *param = params->head;
-                const char *value = NULL;
-                const char *type = NULL;
-                while (param) {
-                    if (strcmp(param->name, name) == 0) {
-                        value = param->value;
-                        type = param->type;
-                        break;
-                    }
-                    param = param->next;
-                }
-                efree(name);
-
-                if (value) {
-                    /* Format value based on type */
-                    if (type && (strncmp(type, "String", 6) == 0 ||
-                                 strncmp(type, "FixedString", 11) == 0)) {
-                        /* String type - add quotes and escape */
-                        smart_str_appendc(&result, '\'');
-                        for (const char *v = value; *v; v++) {
-                            if (*v == '\'') smart_str_appendc(&result, '\'');
-                            smart_str_appendc(&result, *v);
-                        }
-                        smart_str_appendc(&result, '\'');
-                    } else {
-                        /* Numeric/other type - use as-is */
-                        smart_str_appends(&result, value);
-                    }
-                    p = end + 1;
-                    continue;
-                }
+            if (!end || *end != '}') {
+                /* Not a valid {param} pattern */
+                smart_str_appendc(&result, *p);
+                p++;
+                position++;
+                continue;
             }
+
+            /* Extract parameter name (before colon if present, otherwise full name) */
+            size_t name_len = colon ? (colon - start) : (end - start);
+            char *name = estrndup(start, name_len);
+
+            /* Look up parameter */
+            clickhouse_param *param = params->head;
+            const char *value = NULL;
+            const char *type = NULL;
+            int found = 0;
+            while (param) {
+                if (strcmp(param->name, name) == 0) {
+                    value = param->value;
+                    type = param->type;
+                    found = 1;
+                    break;
+                }
+                param = param->next;
+            }
+
+            if (!found) {
+                /* Parameter not found - build helpful error */
+                smart_str error_msg = {0};
+                smart_str_appends(&error_msg, "Parameter '");
+                smart_str_appends(&error_msg, name);
+                smart_str_appends(&error_msg, "' not found in provided parameters.\n");
+
+                /* List available parameters */
+                if (params->count > 0) {
+                    smart_str_appends(&error_msg, "  Available parameters: ");
+                    param = params->head;
+                    int first = 1;
+                    while (param) {
+                        if (!first) smart_str_appends(&error_msg, ", ");
+                        smart_str_appends(&error_msg, "'");
+                        smart_str_appends(&error_msg, param->name);
+                        smart_str_appends(&error_msg, "'");
+                        first = 0;
+                        param = param->next;
+                    }
+                } else {
+                    smart_str_appends(&error_msg, "  No parameters provided");
+                }
+
+                smart_str_0(&error_msg);
+                throw_param_error(name, query, param_start_pos, ZSTR_VAL(error_msg.s));
+                efree(name);
+                smart_str_free(&error_msg);
+                smart_str_free(&result);
+                return NULL;
+            }
+
+            if (value) {
+                /* Format value based on type */
+                if (type && strncmp(type, "Array", 5) == 0) {
+                    /* Array type - value is already formatted as [1,2,3] or ['a','b','c'] */
+                    smart_str_appends(&result, value);
+                } else if (type && (strncmp(type, "String", 6) == 0 ||
+                             strncmp(type, "FixedString", 11) == 0 ||
+                             strncmp(type, "Nullable", 8) == 0 ||
+                             strncmp(type, "UUID", 4) == 0 ||
+                             strncmp(type, "IPv4", 4) == 0 ||
+                             strncmp(type, "IPv6", 4) == 0 ||
+                             strncmp(type, "Date", 4) == 0 ||
+                             strncmp(type, "DateTime", 8) == 0)) {
+                    /* String-like types - add quotes and escape */
+                    smart_str_appendc(&result, '\'');
+                    for (const char *v = value; *v; v++) {
+                        if (*v == '\'') smart_str_appendc(&result, '\'');
+                        smart_str_appendc(&result, *v);
+                    }
+                    smart_str_appendc(&result, '\'');
+                } else {
+                    /* Numeric/other type (including Decimal) - use as-is */
+                    smart_str_appends(&result, value);
+                }
+                position += (end - p) + 1;
+                p = end + 1;
+                efree(name);
+                continue;
+            }
+
+            efree(name);
         }
         smart_str_appendc(&result, *p);
         p++;
+        position++;
     }
 
     smart_str_0(&result);
@@ -3531,22 +5533,30 @@ PHP_METHOD(ClickHouse_Statement, execute) {
     char *final_query = stmt->query;
     if (stmt->opts && stmt->opts->params && stmt->opts->params->count > 0) {
         final_query = substitute_params(stmt->query, stmt->opts->params);
+        if (!final_query) {
+            /* Error already thrown by substitute_params */
+            return;
+        }
     }
 
     clickhouse_result *result = NULL;
     int status = clickhouse_connection_execute_query(stmt->conn, final_query, &result);
-
-    if (final_query != stmt->query) {
-        efree(final_query);
-    }
 
     if (status != 0) {
         const char *error = clickhouse_connection_get_error(stmt->conn);
         if (result) {
             clickhouse_result_free(result);
         }
-        zend_throw_exception(clickhouse_exception_ce, error ? error : "Query failed", 0);
+        /* Use enhanced error message with query context */
+        throw_query_error(error, stmt->query, final_query);
+        if (final_query != stmt->query) {
+            efree(final_query);
+        }
         return;
+    }
+
+    if (final_query != stmt->query) {
+        efree(final_query);
     }
 
     result_to_php_array(result, return_value);
@@ -3569,22 +5579,30 @@ PHP_METHOD(ClickHouse_Statement, fetchAll) {
     char *final_query = stmt->query;
     if (stmt->opts && stmt->opts->params && stmt->opts->params->count > 0) {
         final_query = substitute_params(stmt->query, stmt->opts->params);
+        if (!final_query) {
+            /* Error already thrown by substitute_params */
+            return;
+        }
     }
 
     clickhouse_result *result = NULL;
     int status = clickhouse_connection_execute_query(stmt->conn, final_query, &result);
-
-    if (final_query != stmt->query) {
-        efree(final_query);
-    }
 
     if (status != 0) {
         const char *error = clickhouse_connection_get_error(stmt->conn);
         if (result) {
             clickhouse_result_free(result);
         }
-        zend_throw_exception(clickhouse_exception_ce, error ? error : "Query failed", 0);
+        /* Use enhanced error message with query context */
+        throw_query_error(error, stmt->query, final_query);
+        if (final_query != stmt->query) {
+            efree(final_query);
+        }
         return;
+    }
+
+    if (final_query != stmt->query) {
+        efree(final_query);
     }
 
     result_to_php_array(result, return_value);
@@ -3805,6 +5823,268 @@ static void resultiterator_update_validity(clickhouse_resultiterator_object *int
     intern->finished = 1;
 }
 
+/* ========================= StreamingIterator Methods ========================= */
+
+/* {{{ Helper function to update streaming iterator validity */
+static void streamingiterator_update_validity(clickhouse_streamingiterator_object *intern) {
+    if (!intern->sq || !intern->sq->current_block) {
+        intern->valid = 0;
+        return;
+    }
+
+    clickhouse_block *block = intern->sq->current_block;
+
+    /* Check if current position is within current block */
+    if (intern->current_row < block->row_count) {
+        intern->valid = 1;
+        return;
+    }
+
+    /* Try to fetch next block */
+    int result = clickhouse_streaming_fetch_next_block(intern->sq);
+
+    if (result == 1) {
+        /* Block available, reset row position */
+        intern->current_row = 0;
+        intern->valid = 1;
+        return;
+    }
+
+    if (result == -1) {
+        /* Error fetching block */
+        intern->valid = 0;
+        const char *error_msg = (intern->sq && intern->sq->error) ? intern->sq->error : "Error fetching next block from server";
+        zend_throw_exception(clickhouse_exception_ce, error_msg, 0);
+        return;
+    }
+
+    /* result == 0: no more blocks, streaming complete */
+    intern->valid = 0;
+}
+/* }}} */
+
+/* {{{ proto void ClickHouse\StreamingIterator::rewind()
+   Reset iterator to the beginning by re-executing query */
+PHP_METHOD(ClickHouse_StreamingIterator, rewind) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_streamingiterator_object *intern = Z_CLICKHOUSE_STREAMINGITERATOR_P(ZEND_THIS);
+
+    if (!intern->query_sql) {
+        zend_throw_exception(clickhouse_exception_ce, "Query SQL not stored", 0);
+        return;
+    }
+
+    /* Get client object to access query options */
+    clickhouse_client_object *client = Z_CLICKHOUSE_CLIENT_P(&intern->client_zv);
+
+    /* If this is the first rewind (foreach starting), use existing query */
+    if (intern->sq && !intern->started) {
+        /* First rewind - query already created in queryStreaming(), just fetch first block */
+        intern->current_row = 0;
+        intern->current_key = 0;
+        intern->total_rows = 0;
+
+        int result = clickhouse_streaming_fetch_next_block(intern->sq);
+
+        if (result == -1) {
+            intern->valid = 0;
+            zend_throw_exception(clickhouse_exception_ce, "Error fetching first block from server", 0);
+            return;
+        }
+
+        if (result == 0) {
+            /* No data available */
+            intern->valid = 0;
+            intern->started = 1;
+            return;
+        }
+
+        /* Block fetched successfully */
+        intern->started = 1;
+        if (intern->sq->current_block && intern->sq->current_block->row_count > 0) {
+            intern->valid = 1;
+        } else {
+            intern->valid = 0;
+        }
+        return;
+    }
+
+    /* Subsequent rewinds - need to re-execute query */
+    /* Free old streaming query if exists */
+    if (intern->sq) {
+        clickhouse_streaming_query_free(intern->sq);
+        intern->sq = NULL;
+    }
+
+    /* Reset iteration state */
+    intern->current_row = 0;
+    intern->current_key = 0;
+    intern->total_rows = 0;
+    intern->started = 0;
+    intern->valid = 0;
+
+    /* Re-create query options from client */
+    clickhouse_query_options *opts = NULL;
+    if (client->compression != CH_COMPRESS_NONE || client->session_id || client->default_query_id || client->query_settings) {
+        opts = clickhouse_query_options_create();
+        if (opts) {
+            opts->compression = client->compression;
+            if (client->session_id) {
+                opts->session_id = client->session_id;
+            }
+            if (client->default_query_id) {
+                opts->query_id = client->default_query_id;
+            }
+            /* Copy query settings from client to options */
+            if (client->query_settings) {
+                clickhouse_setting *setting = client->query_settings->head;
+                while (setting) {
+                    clickhouse_query_options_set_setting(opts, setting->name, setting->value);
+                    setting = setting->next;
+                }
+            }
+        }
+    }
+
+    /* Re-execute streaming query using client's connection */
+    clickhouse_streaming_query *sq = NULL;
+    int status;
+    if (opts) {
+        status = clickhouse_connection_query_streaming(client->conn, intern->query_sql, opts, &sq);
+        /* Don't free session_id/query_id as they're borrowed from client */
+        opts->session_id = NULL;
+        opts->query_id = NULL;
+        clickhouse_query_options_free(opts);
+    } else {
+        status = clickhouse_connection_query_streaming(client->conn, intern->query_sql, NULL, &sq);
+    }
+
+    /* Update stored connection reference */
+    intern->conn = client->conn;
+
+    if (status != 0) {
+        const char *error = clickhouse_connection_get_error(intern->conn);
+        if (sq) {
+            clickhouse_streaming_query_free(sq);
+        }
+        zend_throw_exception(clickhouse_exception_ce, error ? error : "Failed to re-execute streaming query", 0);
+        return;
+    }
+
+    /* Transfer ownership of new streaming query */
+    intern->sq = sq;
+
+    /* Fetch first block */
+    int result = clickhouse_streaming_fetch_next_block(intern->sq);
+
+    if (result == -1) {
+        intern->valid = 0;
+        zend_throw_exception(clickhouse_exception_ce, "Error fetching first block from server", 0);
+        return;
+    }
+
+    if (result == 0) {
+        /* No data available */
+        intern->valid = 0;
+        intern->started = 1;
+        return;
+    }
+
+    /* Block fetched successfully - set valid directly */
+    intern->started = 1;
+    if (intern->sq->current_block && intern->sq->current_block->row_count > 0) {
+        intern->valid = 1;
+    } else {
+        intern->valid = 0;
+    }
+}
+/* }}} */
+
+/* {{{ proto mixed ClickHouse\StreamingIterator::current()
+   Return current row as associative array */
+PHP_METHOD(ClickHouse_StreamingIterator, current) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_streamingiterator_object *intern = Z_CLICKHOUSE_STREAMINGITERATOR_P(ZEND_THIS);
+
+    if (!intern->valid || !intern->sq || !intern->sq->current_block) {
+        RETURN_NULL();
+    }
+
+    clickhouse_block *block = intern->sq->current_block;
+
+    array_init(return_value);
+    for (size_t c = 0; c < block->column_count; c++) {
+        clickhouse_column *col = block->columns[c];
+        zval cell;
+        column_value_to_zval(col, intern->current_row, &cell);
+        add_assoc_zval(return_value, col->name, &cell);
+    }
+}
+/* }}} */
+
+/* {{{ proto int ClickHouse\StreamingIterator::key()
+   Return current row index */
+PHP_METHOD(ClickHouse_StreamingIterator, key) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_streamingiterator_object *intern = Z_CLICKHOUSE_STREAMINGITERATOR_P(ZEND_THIS);
+
+    RETURN_LONG(intern->current_key);
+}
+/* }}} */
+
+/* {{{ proto void ClickHouse\StreamingIterator::next()
+   Move to next row, fetching next block if needed */
+PHP_METHOD(ClickHouse_StreamingIterator, next) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_streamingiterator_object *intern = Z_CLICKHOUSE_STREAMINGITERATOR_P(ZEND_THIS);
+
+    if (!intern->sq || !intern->valid) {
+        intern->valid = 0;
+        return;
+    }
+
+    /* Move to next row */
+    intern->current_row++;
+    intern->current_key++;
+    intern->total_rows++;
+
+    /* Update validity, which will fetch next block if needed */
+    streamingiterator_update_validity(intern);
+}
+/* }}} */
+
+/* {{{ proto bool ClickHouse\StreamingIterator::valid()
+   Check if current position is valid */
+PHP_METHOD(ClickHouse_StreamingIterator, valid) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_streamingiterator_object *intern = Z_CLICKHOUSE_STREAMINGITERATOR_P(ZEND_THIS);
+
+    RETURN_BOOL(intern->valid);
+}
+/* }}} */
+
+/* {{{ proto int ClickHouse\StreamingIterator::count()
+   Return total rows fetched so far (not total available) */
+PHP_METHOD(ClickHouse_StreamingIterator, count) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    clickhouse_streamingiterator_object *intern = Z_CLICKHOUSE_STREAMINGITERATOR_P(ZEND_THIS);
+
+    /* For streaming queries, we can only report rows fetched so far
+     * Include current row if we're on a valid position */
+    zend_long count = intern->total_rows;
+    if (intern->valid) {
+        count++;  /* Current row hasn't been counted by next() yet */
+    }
+    RETURN_LONG(count);
+}
+/* }}} */
+
 /* {{{ proto void ClickHouse\ResultIterator::rewind()
    Reset iterator to the beginning */
 PHP_METHOD(ClickHouse_ResultIterator, rewind) {
@@ -4002,6 +6282,93 @@ PHP_METHOD(ClickHouse_Client, queryIterator) {
 }
 /* }}} */
 
+/* {{{ proto StreamingIterator ClickHouse\Client::queryStreaming(string $sql)
+   Execute query and return a StreamingIterator for true streaming results */
+PHP_METHOD(ClickHouse_Client, queryStreaming) {
+    char *sql;
+    size_t sql_len;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(sql, sql_len)
+    ZEND_PARSE_PARAMETERS_END();
+
+    clickhouse_client_object *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+
+    if (!intern->conn || intern->conn->state != CONN_STATE_AUTHENTICATED) {
+        zend_throw_exception(clickhouse_exception_ce, "Not connected", 0);
+        return;
+    }
+
+    /* Create query options */
+    clickhouse_query_options *opts = NULL;
+    if (intern->compression != CH_COMPRESS_NONE || intern->session_id || intern->default_query_id || intern->query_settings) {
+        opts = clickhouse_query_options_create();
+        if (opts) {
+            opts->compression = intern->compression;
+            if (intern->session_id) {
+                opts->session_id = intern->session_id;
+            }
+            if (intern->default_query_id) {
+                opts->query_id = intern->default_query_id;
+            }
+            /* Copy query settings from client to options */
+            if (intern->query_settings) {
+                clickhouse_setting *setting = intern->query_settings->head;
+                while (setting) {
+                    clickhouse_query_options_set_setting(opts, setting->name, setting->value);
+                    setting = setting->next;
+                }
+            }
+        }
+    }
+
+    /* Initialize streaming query */
+    clickhouse_streaming_query *sq = NULL;
+    int status;
+    if (opts) {
+        status = clickhouse_connection_query_streaming(intern->conn, sql, opts, &sq);
+        /* Don't free session_id/query_id as they're borrowed from intern */
+        opts->session_id = NULL;
+        opts->query_id = NULL;
+        clickhouse_query_options_free(opts);
+    } else {
+        status = clickhouse_connection_query_streaming(intern->conn, sql, NULL, &sq);
+    }
+
+    if (status != 0) {
+        const char *error = clickhouse_connection_get_error(intern->conn);
+        if (sq) {
+            clickhouse_streaming_query_free(sq);
+        }
+        zend_throw_exception(clickhouse_exception_ce, error ? error : "Streaming query failed", 0);
+        return;
+    }
+
+    /* Store query ID for tracking */
+    if (intern->last_query_id) {
+        efree(intern->last_query_id);
+        intern->last_query_id = NULL;
+    }
+    if (sq && sq->query_id) {
+        intern->last_query_id = estrdup(sq->query_id);
+    }
+
+    /* Create StreamingIterator object */
+    object_init_ex(return_value, clickhouse_streamingiterator_ce);
+    clickhouse_streamingiterator_object *iter_obj = Z_CLICKHOUSE_STREAMINGITERATOR_P(return_value);
+
+    iter_obj->sq = sq;  /* Transfer ownership */
+    iter_obj->conn = intern->conn;
+    iter_obj->query_sql = estrndup(sql, sql_len);  /* Store SQL for rewind */
+    iter_obj->current_row = 0;
+    iter_obj->current_key = 0;
+    iter_obj->total_rows = 0;
+    iter_obj->valid = 0;
+    iter_obj->started = 0;
+    ZVAL_COPY(&iter_obj->client_zv, ZEND_THIS);
+}
+/* }}} */
+
 /* {{{ arginfo */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_clickhouse_client_construct, 0, 0, 1)
     ZEND_ARG_TYPE_INFO(0, host, IS_STRING, 0)
@@ -4017,6 +6384,11 @@ ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_execute, 0, 1, IS_VOID, 0)
     ZEND_ARG_TYPE_INFO(0, sql, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_executebatch, 0, 1, IS_ARRAY, 0)
+    ZEND_ARG_TYPE_INFO(0, queries, IS_ARRAY, 0)
+    ZEND_ARG_TYPE_INFO(0, options, IS_ARRAY, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_insert, 0, 3, IS_VOID, 0)
@@ -4055,6 +6427,41 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_setcompression
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_getcompression, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+/* Progress callback arginfo */
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_setprogresscallback, 0, 1, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, callback, IS_CALLABLE, 1)
+ZEND_END_ARG_INFO()
+
+/* Profile callback arginfo */
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_setprofilecallback, 0, 1, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, callback, IS_CALLABLE, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_setlogcallback, 0, 1, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, callback, IS_CALLABLE, 1)
+ZEND_END_ARG_INFO()
+
+/* Read-only mode arginfo */
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_setreadonly, 0, 1, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, readonly, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_isreadonly, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+/* Insert from string/file arginfo */
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_insertfromstring, 0, 2, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, table, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, data, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, format, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_insertfromfile, 0, 2, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, table, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, filepath, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, format, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
 /* Timeout arginfo */
@@ -4098,6 +6505,10 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_cancel, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_clickhouse_client_fromdsn, 0, 1, ClickHouse\\Client, 0)
+    ZEND_ARG_TYPE_INFO(0, dsn, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
 /* Session and Query ID arginfo */
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_setsession, 0, 1, IS_VOID, 0)
     ZEND_ARG_TYPE_INFO(0, session_id, IS_STRING, 1)
@@ -4117,6 +6528,35 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_getautoreconnect, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
+/* Retry configuration arginfo */
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_setmaxretryattempts, 0, 1, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, max_attempts, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_getmaxretryattempts, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_setretrydelay, 0, 2, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, base_delay, IS_DOUBLE, 0)
+    ZEND_ARG_TYPE_INFO(0, max_delay, IS_DOUBLE, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_getretrydelay, 0, 0, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_setretryjitter, 0, 1, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, enabled, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_getretryjitter, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_gettotalretryattempts, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_resetretrymetrics, 0, 0, IS_VOID, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_setqueryid, 0, 1, IS_VOID, 0)
     ZEND_ARG_TYPE_INFO(0, query_id, IS_STRING, 1)
 ZEND_END_ARG_INFO()
@@ -4126,6 +6566,36 @@ ZEND_END_ARG_INFO()
 
 /* Query tracking arginfo */
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_getlastqueryid, 0, 0, IS_STRING, 1)
+ZEND_END_ARG_INFO()
+
+/* Metrics arginfo */
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_enablemetrics, 0, 0, IS_VOID, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_disablemetrics, 0, 0, IS_VOID, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_getmetrics, 0, 0, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_resetmetrics, 0, 0, IS_VOID, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_setslowquerythreshold, 0, 1, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, threshold, IS_DOUBLE, 0)
+ZEND_END_ARG_INFO()
+
+/* Transaction arginfo (EXPERIMENTAL) */
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_begintransaction, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_commit, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_rollback, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_intransaction, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_client_setquerysetting, 0, 2, IS_VOID, 0)
@@ -4211,11 +6681,34 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_resultiterator_count, 0, 0, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_clickhouse_client_querystreaming, 0, 1, ClickHouse\\StreamingIterator, 0)
+    ZEND_ARG_TYPE_INFO(0, sql, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_streamingiterator_rewind, 0, 0, IS_VOID, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_streamingiterator_current, 0, 0, IS_MIXED, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_streamingiterator_key, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_streamingiterator_next, 0, 0, IS_VOID, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_streamingiterator_valid, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_streamingiterator_count, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
 /* {{{ Client methods */
 static const zend_function_entry clickhouse_client_methods[] = {
     PHP_ME(ClickHouse_Client, __construct, arginfo_clickhouse_client_construct, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, query, arginfo_clickhouse_client_query, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, execute, arginfo_clickhouse_client_execute, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, executeBatch, arginfo_clickhouse_client_executebatch, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, insert, arginfo_clickhouse_client_insert, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, ping, arginfo_clickhouse_client_ping, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, close, arginfo_clickhouse_client_close, ZEND_ACC_PUBLIC)
@@ -4227,6 +6720,17 @@ static const zend_function_entry clickhouse_client_methods[] = {
     PHP_ME(ClickHouse_Client, describeTable, arginfo_clickhouse_client_describetable, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, setCompression, arginfo_clickhouse_client_setcompression, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, getCompression, arginfo_clickhouse_client_getcompression, ZEND_ACC_PUBLIC)
+    /* Progress callback method */
+    PHP_ME(ClickHouse_Client, setProgressCallback, arginfo_clickhouse_client_setprogresscallback, ZEND_ACC_PUBLIC)
+    /* Profile callback method */
+    PHP_ME(ClickHouse_Client, setProfileCallback, arginfo_clickhouse_client_setprofilecallback, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, setLogCallback, arginfo_clickhouse_client_setlogcallback, ZEND_ACC_PUBLIC)
+    /* Read-only mode methods */
+    PHP_ME(ClickHouse_Client, setReadOnly, arginfo_clickhouse_client_setreadonly, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, isReadOnly, arginfo_clickhouse_client_isreadonly, ZEND_ACC_PUBLIC)
+    /* Insert from string/file methods */
+    PHP_ME(ClickHouse_Client, insertFromString, arginfo_clickhouse_client_insertfromstring, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, insertFromFile, arginfo_clickhouse_client_insertfromfile, ZEND_ACC_PUBLIC)
     /* Timeout methods */
     PHP_ME(ClickHouse_Client, setTimeout, arginfo_clickhouse_client_settimeout, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, getTimeout, arginfo_clickhouse_client_gettimeout, ZEND_ACC_PUBLIC)
@@ -4240,6 +6744,7 @@ static const zend_function_entry clickhouse_client_methods[] = {
     /* New feature methods */
     PHP_ME(ClickHouse_Client, queryWithMeta, arginfo_clickhouse_client_querywithmeta, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, cancel, arginfo_clickhouse_client_cancel, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, fromDSN, arginfo_clickhouse_client_fromdsn, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
     /* Session and Query ID methods */
     PHP_ME(ClickHouse_Client, setSession, arginfo_clickhouse_client_setsession, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, getSession, arginfo_clickhouse_client_getsession, ZEND_ACC_PUBLIC)
@@ -4247,16 +6752,37 @@ static const zend_function_entry clickhouse_client_methods[] = {
     PHP_ME(ClickHouse_Client, reconnect, arginfo_clickhouse_client_reconnect, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, setAutoReconnect, arginfo_clickhouse_client_setautoreconnect, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, getAutoReconnect, arginfo_clickhouse_client_getautoreconnect, ZEND_ACC_PUBLIC)
+    /* Retry configuration methods */
+    PHP_ME(ClickHouse_Client, setMaxRetryAttempts, arginfo_clickhouse_client_setmaxretryattempts, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, getMaxRetryAttempts, arginfo_clickhouse_client_getmaxretryattempts, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, setRetryDelay, arginfo_clickhouse_client_setretrydelay, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, getRetryDelay, arginfo_clickhouse_client_getretrydelay, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, setRetryJitter, arginfo_clickhouse_client_setretryjitter, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, getRetryJitter, arginfo_clickhouse_client_getretryjitter, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, getTotalRetryAttempts, arginfo_clickhouse_client_gettotalretryattempts, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, resetRetryMetrics, arginfo_clickhouse_client_resetretrymetrics, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, setQueryId, arginfo_clickhouse_client_setqueryid, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, getQueryId, arginfo_clickhouse_client_getqueryid, ZEND_ACC_PUBLIC)
     /* Query tracking methods */
     PHP_ME(ClickHouse_Client, getLastQueryId, arginfo_clickhouse_client_getlastqueryid, ZEND_ACC_PUBLIC)
+    /* Metrics methods */
+    PHP_ME(ClickHouse_Client, enableMetrics, arginfo_clickhouse_client_enablemetrics, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, disableMetrics, arginfo_clickhouse_client_disablemetrics, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, getMetrics, arginfo_clickhouse_client_getmetrics, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, resetMetrics, arginfo_clickhouse_client_resetmetrics, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, setSlowQueryThreshold, arginfo_clickhouse_client_setslowquerythreshold, ZEND_ACC_PUBLIC)
+    /* Transaction methods (EXPERIMENTAL) */
+    PHP_ME(ClickHouse_Client, beginTransaction, arginfo_clickhouse_client_begintransaction, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, commit, arginfo_clickhouse_client_commit, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, rollback, arginfo_clickhouse_client_rollback, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, inTransaction, arginfo_clickhouse_client_intransaction, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, setQuerySetting, arginfo_clickhouse_client_setquerysetting, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, clearQuerySettings, arginfo_clickhouse_client_clearquerysettings, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, queryWithTable, arginfo_clickhouse_client_querywithtable, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, prepare, arginfo_clickhouse_client_prepare, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, queryAsync, arginfo_clickhouse_client_queryasync, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_Client, queryIterator, arginfo_clickhouse_client_queryiterator, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_Client, queryStreaming, arginfo_clickhouse_client_querystreaming, ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
 /* }}} */
@@ -4290,6 +6816,18 @@ static const zend_function_entry clickhouse_resultiterator_methods[] = {
     PHP_ME(ClickHouse_ResultIterator, next, arginfo_clickhouse_resultiterator_next, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_ResultIterator, valid, arginfo_clickhouse_resultiterator_valid, ZEND_ACC_PUBLIC)
     PHP_ME(ClickHouse_ResultIterator, count, arginfo_clickhouse_resultiterator_count, ZEND_ACC_PUBLIC)
+    PHP_FE_END
+};
+/* }}} */
+
+/* {{{ StreamingIterator methods */
+static const zend_function_entry clickhouse_streamingiterator_methods[] = {
+    PHP_ME(ClickHouse_StreamingIterator, rewind, arginfo_clickhouse_streamingiterator_rewind, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_StreamingIterator, current, arginfo_clickhouse_streamingiterator_current, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_StreamingIterator, key, arginfo_clickhouse_streamingiterator_key, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_StreamingIterator, next, arginfo_clickhouse_streamingiterator_next, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_StreamingIterator, valid, arginfo_clickhouse_streamingiterator_valid, ZEND_ACC_PUBLIC)
+    PHP_ME(ClickHouse_StreamingIterator, count, arginfo_clickhouse_streamingiterator_count, ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
 /* }}} */
@@ -4389,6 +6927,17 @@ PHP_MINIT_FUNCTION(clickhouse) {
     memcpy(&clickhouse_resultiterator_handlers, &std_object_handlers, sizeof(zend_object_handlers));
     clickhouse_resultiterator_handlers.offset = XtOffsetOf(clickhouse_resultiterator_object, std);
     clickhouse_resultiterator_handlers.free_obj = clickhouse_resultiterator_free;
+
+    /* Register ClickHouse\StreamingIterator */
+    INIT_NS_CLASS_ENTRY(ce, "ClickHouse", "StreamingIterator", clickhouse_streamingiterator_methods);
+    clickhouse_streamingiterator_ce = zend_register_internal_class(&ce);
+    clickhouse_streamingiterator_ce->create_object = clickhouse_streamingiterator_create;
+    /* Implement Iterator and Countable interfaces */
+    zend_class_implements(clickhouse_streamingiterator_ce, 2, zend_ce_iterator, zend_ce_countable);
+
+    memcpy(&clickhouse_streamingiterator_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+    clickhouse_streamingiterator_handlers.offset = XtOffsetOf(clickhouse_streamingiterator_object, std);
+    clickhouse_streamingiterator_handlers.free_obj = clickhouse_streamingiterator_free;
 
     /* Register compression constants on Client class */
     zend_declare_class_constant_long(clickhouse_client_ce, "COMPRESS_NONE", sizeof("COMPRESS_NONE")-1, CH_COMPRESS_NONE);

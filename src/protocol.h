@@ -145,6 +145,16 @@ typedef struct {
     uint8_t calculated_rows_before_limit;
 } clickhouse_profile_info;
 
+/* Log entry (from server log packet) */
+typedef struct {
+    uint32_t time;           /* Unix timestamp */
+    uint32_t time_microseconds;
+    uint64_t thread_id;
+    uint8_t priority;        /* Log level: 1=Fatal, 2=Critical, 3=Error, 4=Warning, 5=Notice, 6=Information, 7=Debug, 8=Trace */
+    char *source;            /* Source file/function */
+    char *text;              /* Log message text */
+} clickhouse_log_entry;
+
 /* Exception info */
 typedef struct {
     int32_t code;
@@ -185,6 +195,10 @@ int clickhouse_progress_read(clickhouse_buffer *buf, clickhouse_progress *progre
 
 /* Profile info handling */
 int clickhouse_profile_info_read(clickhouse_buffer *buf, clickhouse_profile_info *info);
+
+/* Log entry handling */
+clickhouse_log_entry *clickhouse_log_entry_read(clickhouse_buffer *buf);
+void clickhouse_log_entry_free(clickhouse_log_entry *entry);
 
 /* Query settings */
 clickhouse_settings *clickhouse_settings_create(void);

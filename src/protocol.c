@@ -348,6 +348,64 @@ int clickhouse_profile_info_read(clickhouse_buffer *buf, clickhouse_profile_info
     return 0;
 }
 
+/* Log entry handling */
+
+clickhouse_log_entry *clickhouse_log_entry_read(clickhouse_buffer *buf) {
+    clickhouse_log_entry *entry = calloc(1, sizeof(clickhouse_log_entry));
+    if (!entry) return NULL;
+
+    /* Read time (seconds since epoch) */
+    if (clickhouse_buffer_read_uint32(buf, &entry->time) != 0) {
+        free(entry);
+        return NULL;
+    }
+
+    /* Read microseconds */
+    if (clickhouse_buffer_read_uint32(buf, &entry->time_microseconds) != 0) {
+        free(entry);
+        return NULL;
+    }
+
+    /* Read thread ID */
+    if (clickhouse_buffer_read_varint(buf, &entry->thread_id) != 0) {
+        free(entry);
+        return NULL;
+    }
+
+    /* Read priority (log level) */
+    uint64_t priority_val;
+    if (clickhouse_buffer_read_varint(buf, &priority_val) != 0) {
+        free(entry);
+        return NULL;
+    }
+    entry->priority = (uint8_t)priority_val;
+
+    /* Read source (file/function name) */
+    size_t source_len;
+    if (clickhouse_buffer_read_string(buf, &entry->source, &source_len) != 0) {
+        free(entry);
+        return NULL;
+    }
+
+    /* Read text (log message) */
+    size_t text_len;
+    if (clickhouse_buffer_read_string(buf, &entry->text, &text_len) != 0) {
+        free(entry->source);
+        free(entry);
+        return NULL;
+    }
+
+    return entry;
+}
+
+void clickhouse_log_entry_free(clickhouse_log_entry *entry) {
+    if (entry) {
+        if (entry->source) free(entry->source);
+        if (entry->text) free(entry->text);
+        free(entry);
+    }
+}
+
 /* Query settings */
 
 clickhouse_settings *clickhouse_settings_create(void) {

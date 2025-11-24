@@ -38,6 +38,7 @@ static const struct {
     {"UInt256", CH_TYPE_UINT256, 32},
     {"Float32", CH_TYPE_FLOAT32, 4},
     {"Float64", CH_TYPE_FLOAT64, 8},
+    {"BFloat16", CH_TYPE_BFLOAT16, 2},
     {"String", CH_TYPE_STRING, 0},
     {"Date", CH_TYPE_DATE, 2},
     {"Date32", CH_TYPE_DATE32, 4},
@@ -52,6 +53,18 @@ static const struct {
     {"Polygon", CH_TYPE_POLYGON, 0},
     {"MultiPolygon", CH_TYPE_MULTIPOLYGON, 0},
     {"JSON", CH_TYPE_JSON, 0},
+    /* Interval types - all stored as Int64 */
+    {"IntervalNanosecond", CH_TYPE_INTERVAL_NANOSECOND, 8},
+    {"IntervalMicrosecond", CH_TYPE_INTERVAL_MICROSECOND, 8},
+    {"IntervalMillisecond", CH_TYPE_INTERVAL_MILLISECOND, 8},
+    {"IntervalSecond", CH_TYPE_INTERVAL_SECOND, 8},
+    {"IntervalMinute", CH_TYPE_INTERVAL_MINUTE, 8},
+    {"IntervalHour", CH_TYPE_INTERVAL_HOUR, 8},
+    {"IntervalDay", CH_TYPE_INTERVAL_DAY, 8},
+    {"IntervalWeek", CH_TYPE_INTERVAL_WEEK, 8},
+    {"IntervalMonth", CH_TYPE_INTERVAL_MONTH, 8},
+    {"IntervalQuarter", CH_TYPE_INTERVAL_QUARTER, 8},
+    {"IntervalYear", CH_TYPE_INTERVAL_YEAR, 8},
     {NULL, CH_TYPE_UNKNOWN, 0}
 };
 
