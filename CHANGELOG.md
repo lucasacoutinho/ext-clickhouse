@@ -2,6 +2,12 @@
 
 All notable changes to the ClickHouse Native PHP Extension will be documented in this file.
 
+## [0.3.0] - 2025-11-24
+
+### Changed
+- Bumped extension version to 0.3.0 to align with PDO driver and Laravel adapter releases.
+- No functional changes from 0.2.x; release ensures consistent cross-project versioning.
+
 ## [0.2.0] - 2025-11-23
 
 ### Added
