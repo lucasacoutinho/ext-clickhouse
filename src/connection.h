@@ -64,6 +64,7 @@ void clickhouse_connection_close(clickhouse_connection *conn);
 int clickhouse_connection_ping(clickhouse_connection *conn);
 int clickhouse_connection_send(clickhouse_connection *conn);
 int clickhouse_connection_receive(clickhouse_connection *conn);
+int clickhouse_connection_receive_more(clickhouse_connection *conn);
 int clickhouse_connection_read_packet_type(clickhouse_connection *conn, uint64_t *packet_type);
 
 /* Error handling */

@@ -2,6 +2,12 @@
 
 All notable changes to the ClickHouse Native PHP Extension will be documented in this file.
 
+## [0.3.1] - 2025-11-25
+
+### Changed
+- Bumped extension version to 0.3.1 for release packaging.
+- Cleaned build artifacts to ensure source-only distribution.
+
 ## [0.3.0] - 2025-11-24
 
 ### Changed

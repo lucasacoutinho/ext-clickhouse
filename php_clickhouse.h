@@ -16,7 +16,7 @@ extern zend_module_entry clickhouse_module_entry;
 #define phpext_clickhouse_ptr &clickhouse_module_entry
 
 #ifndef PHP_CLICKHOUSE_VERSION
-#define PHP_CLICKHOUSE_VERSION "0.3.0"
+#define PHP_CLICKHOUSE_VERSION "0.3.1"
 #endif
 #define PHP_CLICKHOUSE_EXTNAME "clickhouse"
 

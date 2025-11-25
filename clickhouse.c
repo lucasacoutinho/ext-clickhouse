@@ -3313,294 +3313,56 @@ PHP_METHOD(ClickHouse_Client, insert) {
         return;
     }
 
-    /* Build INSERT query */
-    char *query = build_insert_query(table, columns);
+    /* Serialize rows to JSONEachRow and stream via FORMAT insert */
+    smart_str payload = {0};
+    size_t col_count = zend_hash_num_elements(Z_ARRVAL_P(columns));
 
-    /* Send INSERT query - server will respond with expected block structure */
-    clickhouse_client_info *client_info = clickhouse_client_info_create();
-    if (!client_info) {
-        efree(query);
-        zend_throw_exception(clickhouse_exception_ce, "Failed to create client info", 0);
-        return;
-    }
-
-    clickhouse_buffer_reset(intern->conn->write_buf);
-    /* Use min of server and client revision for protocol negotiation */
-    uint64_t server_rev = intern->conn->server_info ? intern->conn->server_info->revision : CLICKHOUSE_REVISION;
-    uint64_t protocol_revision = (server_rev < CLICKHOUSE_REVISION) ? server_rev : CLICKHOUSE_REVISION;
-    if (clickhouse_write_query(intern->conn->write_buf, "", client_info, query,
-                               CH_STAGE_COMPLETE, CH_COMPRESS_NONE, protocol_revision) != 0) {
-        clickhouse_client_info_free(client_info);
-        efree(query);
-        zend_throw_exception(clickhouse_exception_ce, "Failed to build query packet", 0);
-        return;
-    }
-    clickhouse_client_info_free(client_info);
-    efree(query);
-
-    if (clickhouse_connection_send(intern->conn) != 0) {
-        zend_throw_exception(clickhouse_exception_ce,
-            clickhouse_connection_get_error(intern->conn), 0);
-        return;
-    }
-
-    /* Send initial empty block to signal we're ready to receive sample block */
-    if (clickhouse_connection_send_empty_block(intern->conn) != 0) {
-        zend_throw_exception(clickhouse_exception_ce,
-            clickhouse_connection_get_error(intern->conn), 0);
-        return;
-    }
-
-    /* Receive expected block structure - loop until we get Data packet */
-    uint64_t packet_type;
-    int got_data = 0;
-
-    while (!got_data) {
-        if (clickhouse_connection_receive(intern->conn) != 0) {
-            zend_throw_exception(clickhouse_exception_ce,
-                clickhouse_connection_get_error(intern->conn), 0);
-            return;
-        }
-
-        if (clickhouse_buffer_read_varint(intern->conn->read_buf, &packet_type) != 0) {
-            zend_throw_exception(clickhouse_exception_ce, "Failed to read packet type", 0);
-            return;
-        }
-
-        switch (packet_type) {
-            case CH_SERVER_DATA:
-                got_data = 1;
-                break;
-
-            case CH_SERVER_EXCEPTION: {
-                clickhouse_exception *ex = clickhouse_exception_read(intern->conn->read_buf);
-                if (ex) {
-                    zend_throw_exception(clickhouse_exception_ce, ex->message, ex->code);
-                    clickhouse_exception_free(ex);
-                } else {
-                    zend_throw_exception(clickhouse_exception_ce, "Server exception", 0);
-                }
-                return;
-            }
-
-            case CH_SERVER_PROGRESS: {
-                /* Read progress info */
-                uint64_t progress_rows, progress_bytes, progress_total_rows, progress_written_rows, progress_written_bytes;
-                clickhouse_buffer_read_varint(intern->conn->read_buf, &progress_rows);
-                clickhouse_buffer_read_varint(intern->conn->read_buf, &progress_bytes);
-                clickhouse_buffer_read_varint(intern->conn->read_buf, &progress_total_rows);
-                clickhouse_buffer_read_varint(intern->conn->read_buf, &progress_written_rows);
-                clickhouse_buffer_read_varint(intern->conn->read_buf, &progress_written_bytes);
-
-                /* Call progress callback if set */
-                if (!Z_ISUNDEF(intern->progress_callback)) {
-                    zval args[5], retval;
-                    ZVAL_LONG(&args[0], progress_rows);
-                    ZVAL_LONG(&args[1], progress_bytes);
-                    ZVAL_LONG(&args[2], progress_total_rows);
-                    ZVAL_LONG(&args[3], progress_written_rows);
-                    ZVAL_LONG(&args[4], progress_written_bytes);
-
-                    if (call_user_function(NULL, NULL, &intern->progress_callback, &retval, 5, args) == SUCCESS) {
-                        zval_ptr_dtor(&retval);
-                    }
-                }
-                break;
-            }
-
-            case CH_SERVER_TABLE_COLUMNS: {
-                /* Skip TableColumns: table_name (string) + column_descriptions (block) */
-                char *table_name;
-                size_t table_name_len;
-                if (clickhouse_buffer_read_string(intern->conn->read_buf, &table_name, &table_name_len) == 0) {
-                    free(table_name);
-                    /* Read and discard the columns block */
-                    clickhouse_block *columns_block = clickhouse_block_create();
-                    if (columns_block) {
-                        clickhouse_block_read(intern->conn->read_buf, columns_block);
-                        clickhouse_block_free(columns_block);
-                    }
-                }
-                break;
-            }
-
-            case CH_SERVER_PROFILE_INFO: {
-                /* Read profile info */
-                uint64_t profile_rows, profile_blocks, profile_bytes, profile_rows_before_limit;
-                uint8_t profile_applied_limit, profile_calculated_rows_before_limit;
-                clickhouse_buffer_read_varint(intern->conn->read_buf, &profile_rows);
-                clickhouse_buffer_read_varint(intern->conn->read_buf, &profile_blocks);
-                clickhouse_buffer_read_varint(intern->conn->read_buf, &profile_bytes);
-                clickhouse_buffer_read_bytes(intern->conn->read_buf, &profile_applied_limit, 1);
-                clickhouse_buffer_read_varint(intern->conn->read_buf, &profile_rows_before_limit);
-                clickhouse_buffer_read_bytes(intern->conn->read_buf, &profile_calculated_rows_before_limit, 1);
-
-                /* Call profile callback if set */
-                if (!Z_ISUNDEF(intern->profile_callback)) {
-                    zval args[6], retval;
-                    ZVAL_LONG(&args[0], profile_rows);
-                    ZVAL_LONG(&args[1], profile_blocks);
-                    ZVAL_LONG(&args[2], profile_bytes);
-                    ZVAL_BOOL(&args[3], profile_applied_limit);
-                    ZVAL_LONG(&args[4], profile_rows_before_limit);
-                    ZVAL_BOOL(&args[5], profile_calculated_rows_before_limit);
-
-                    if (call_user_function(NULL, NULL, &intern->profile_callback, &retval, 6, args) == SUCCESS) {
-                        zval_ptr_dtor(&retval);
-                    }
-                }
-                break;
-            }
-
-            case CH_SERVER_LOG: {
-                /* Read and handle log entry */
-                clickhouse_log_entry *log_entry = clickhouse_log_entry_read(intern->conn->read_buf);
-                if (log_entry) {
-                    /* Call log callback if set */
-                    if (!Z_ISUNDEF(intern->log_callback)) {
-                        zval args[6], retval;
-                        ZVAL_LONG(&args[0], log_entry->time);
-                        ZVAL_LONG(&args[1], log_entry->time_microseconds);
-                        ZVAL_LONG(&args[2], log_entry->thread_id);
-                        ZVAL_LONG(&args[3], log_entry->priority);
-                        ZVAL_STRING(&args[4], log_entry->source ? log_entry->source : "");
-                        ZVAL_STRING(&args[5], log_entry->text ? log_entry->text : "");
-
-                        if (call_user_function(NULL, NULL, &intern->log_callback, &retval, 6, args) == SUCCESS) {
-                            zval_ptr_dtor(&retval);
-                        }
-
-                        /* Clean up zval strings */
-                        zval_ptr_dtor(&args[4]);
-                        zval_ptr_dtor(&args[5]);
-                    }
-                    clickhouse_log_entry_free(log_entry);
-                }
-                break;
-            }
-
-            default:
-                /* Unknown packet type - skip it and continue */
-                break;
-        }
-    }
-
-    /* Read sample block (contains column info) */
-    char *tbl_name;
-    size_t tbl_name_len;
-    clickhouse_buffer_read_string(intern->conn->read_buf, &tbl_name, &tbl_name_len);
-    free(tbl_name);
-
-    clickhouse_block *sample_block = clickhouse_block_create();
-    if (clickhouse_block_read(intern->conn->read_buf, sample_block) != 0) {
-        clickhouse_block_free(sample_block);
-        zend_throw_exception(clickhouse_exception_ce, "Failed to read sample block", 0);
-        return;
-    }
-
-    /* Create data block with actual data */
-    size_t row_count = zend_hash_num_elements(Z_ARRVAL_P(rows));
-    size_t col_count = sample_block->column_count;
-
-    clickhouse_block *data_block = clickhouse_block_create();
-    data_block->row_count = row_count;
-
-    /* Prepare columns based on sample */
-    for (size_t c = 0; c < col_count; c++) {
-        clickhouse_column *sample_col = sample_block->columns[c];
-        clickhouse_type_info *type = clickhouse_type_parse(sample_col->type->type_name);
-
-        clickhouse_column *data_col = clickhouse_column_create(sample_col->name, type);
-        data_col->row_count = row_count;
-
-        /* Allocate data storage */
-        size_t elem_size = clickhouse_type_size(type);
-        if (type->type_id == CH_TYPE_NULLABLE) {
-            data_col->nulls = calloc(row_count, 1);
-            elem_size = clickhouse_type_size(type->nested);
-        }
-
-        if (type->type_id == CH_TYPE_STRING ||
-            (type->type_id == CH_TYPE_NULLABLE && type->nested &&
-             type->nested->type_id == CH_TYPE_STRING)) {
-            data_col->data = calloc(row_count, sizeof(char *));
-        } else if (elem_size > 0) {
-            data_col->data = calloc(row_count, elem_size);
-        }
-
-        clickhouse_block_add_column(data_block, data_col);
-    }
-
-    /* Fill data from PHP rows */
-    size_t row_idx = 0;
     zval *row;
     ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(rows), row) {
         if (Z_TYPE_P(row) != IS_ARRAY) {
             continue;
         }
 
-        for (size_t c = 0; c < col_count; c++) {
-            zval *cell = zend_hash_index_find(Z_ARRVAL_P(row), c);
+        zval row_obj;
+        array_init(&row_obj);
+
+        size_t idx = 0;
+        zval *col_zv;
+        ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(columns), col_zv) {
+            zend_string *col_name = zval_get_string(col_zv);
+            zval *cell = zend_hash_index_find(Z_ARRVAL_P(row), idx);
             if (cell) {
-                set_column_value(data_block->columns[c], row_idx, cell);
+                Z_TRY_ADDREF_P(cell);
+                add_assoc_zval_ex(&row_obj, ZSTR_VAL(col_name), ZSTR_LEN(col_name), cell);
+            } else {
+                add_assoc_null_ex(&row_obj, ZSTR_VAL(col_name), ZSTR_LEN(col_name));
             }
-        }
-        row_idx++;
+            zend_string_release(col_name);
+            idx++;
+        } ZEND_HASH_FOREACH_END();
+
+        smart_str json_row = {0};
+        php_json_encode(&json_row, &row_obj, PHP_JSON_UNESCAPED_UNICODE | PHP_JSON_UNESCAPED_SLASHES);
+        smart_str_appendc(&json_row, '\n');
+        smart_str_append_smart_str(&payload, &json_row);
+        smart_str_free(&json_row);
+        zval_ptr_dtor(&row_obj);
     } ZEND_HASH_FOREACH_END();
 
-    /* Send data block */
-    if (clickhouse_connection_send_data(intern->conn, data_block) != 0) {
-        clickhouse_block_free(sample_block);
-        clickhouse_block_free(data_block);
-        zend_throw_exception(clickhouse_exception_ce,
-            clickhouse_connection_get_error(intern->conn), 0);
+    smart_str_0(&payload);
+
+    int status = clickhouse_connection_insert_format_data(intern->conn, table, "JSONEachRow",
+                                                          payload.s ? ZSTR_VAL(payload.s) : "",
+                                                          payload.s ? ZSTR_LEN(payload.s) : 0);
+    smart_str_free(&payload);
+
+    if (status != 0) {
+        const char *error = clickhouse_connection_get_error(intern->conn);
+        zend_throw_exception(clickhouse_exception_ce, error ? error : "Insert failed", 0);
         return;
     }
-
-    /* Send empty block to signal end */
-    if (clickhouse_connection_send_empty_block(intern->conn) != 0) {
-        clickhouse_block_free(sample_block);
-        clickhouse_block_free(data_block);
-        zend_throw_exception(clickhouse_exception_ce,
-            clickhouse_connection_get_error(intern->conn), 0);
-        return;
-    }
-
-    /* Read final response */
-    if (clickhouse_connection_receive(intern->conn) != 0) {
-        clickhouse_block_free(sample_block);
-        clickhouse_block_free(data_block);
-        zend_throw_exception(clickhouse_exception_ce,
-            clickhouse_connection_get_error(intern->conn), 0);
-        return;
-    }
-
-    /* Check for errors in response */
-    while (clickhouse_buffer_remaining(intern->conn->read_buf) > 0) {
-        if (clickhouse_buffer_read_varint(intern->conn->read_buf, &packet_type) != 0) {
-            break;
-        }
-
-        if (packet_type == CH_SERVER_EXCEPTION) {
-            clickhouse_exception *ex = clickhouse_exception_read(intern->conn->read_buf);
-            clickhouse_block_free(sample_block);
-            clickhouse_block_free(data_block);
-            if (ex) {
-                zend_throw_exception(clickhouse_exception_ce, ex->message, ex->code);
-                clickhouse_exception_free(ex);
-            }
-            return;
-        }
-
-        if (packet_type == CH_SERVER_END_OF_STREAM) {
-            break;
-        }
-    }
-
-    clickhouse_block_free(sample_block);
-    clickhouse_block_free(data_block);
 }
-/* }}} */
+
 
 /* {{{ proto bool ClickHouse\Client::ping() */
 PHP_METHOD(ClickHouse_Client, ping) {

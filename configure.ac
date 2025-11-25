@@ -115,7 +115,10 @@ dnl Discard optimization flags when debugging is enabled.
 if test "$PHP_DEBUG" = "yes"; then
   PHP_DEBUG=1
   ZEND_DEBUG=yes
-  PHP_REMOVE_OPTIMIZATION_FLAGS
+  changequote({,})
+  CFLAGS=`echo "$CFLAGS" | $SED -e 's/-O[0-9s]*//g'`
+  CXXFLAGS=`echo "$CXXFLAGS" | $SED -e 's/-O[0-9s]*//g'`
+  changequote([,])
   dnl Add -O0 only if GCC or ICC is used.
   if test "$GCC" = "yes" || test "$ICC" = "yes"; then
     CFLAGS="$CFLAGS -O0"
@@ -161,7 +164,7 @@ all_targets='$(PHP_MODULES) $(PHP_ZEND_EX)'
 install_targets="install-modules install-headers"
 phplibdir="`pwd`/modules"
 CPPFLAGS="$CPPFLAGS -DHAVE_CONFIG_H"
-CFLAGS_CLEAN='$(CFLAGS) -D_GNU_SOURCE'
+CFLAGS_CLEAN='$(CFLAGS)'
 CXXFLAGS_CLEAN='$(CXXFLAGS)'
 
 test "$prefix" = "NONE" && prefix="/usr/local"

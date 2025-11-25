@@ -570,7 +570,7 @@ int clickhouse_connection_receive(clickhouse_connection *conn) {
 }
 
 /* Receive more data, compacting unread data and appending new data */
-static int clickhouse_connection_receive_more(clickhouse_connection *conn) {
+int clickhouse_connection_receive_more(clickhouse_connection *conn) {
     if (conn->state == CONN_STATE_DISCONNECTED) {
         clickhouse_connection_set_error(conn, "Not connected");
         return -1;
