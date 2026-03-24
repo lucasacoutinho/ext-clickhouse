@@ -244,7 +244,9 @@ void php_clickhouse_register_server_info(int module_number)
 
     INIT_NS_CLASS_ENTRY(ce, "ClickHouse\\Driver", "ServerInfo", NULL);
     clickhouse_ce_ServerInfo = zend_register_internal_class(&ce);
+#if PHP_VERSION_ID >= 80200
     clickhouse_ce_ServerInfo->ce_flags |= ZEND_ACC_READONLY_CLASS;
+#endif
 
     zend_declare_property_string(clickhouse_ce_ServerInfo, "name", sizeof("name") - 1, "", ZEND_ACC_PUBLIC | ZEND_ACC_READONLY);
     zend_declare_property_string(clickhouse_ce_ServerInfo, "timezone", sizeof("timezone") - 1, "", ZEND_ACC_PUBLIC | ZEND_ACC_READONLY);
