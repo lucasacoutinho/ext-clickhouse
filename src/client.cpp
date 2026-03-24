@@ -325,6 +325,7 @@ ZEND_METHOD(ClickHouse_Driver_Client, selectWithExternalData)
             zval *name_zv = zend_hash_str_find(t, "name", sizeof("name") - 1);
             zval *data_zv = zend_hash_str_find(t, "data", sizeof("data") - 1);
             if (!name_zv || Z_TYPE_P(name_zv) != IS_STRING || !data_zv ||
+                Z_TYPE_P(data_zv) != IS_OBJECT ||
                 !instanceof_function(Z_OBJCE_P(data_zv), clickhouse_ce_Block)) {
                 continue;
             }
