@@ -20,6 +20,7 @@ static zend_object *php_clickhouse_client_options_create(zend_class_entry *ce)
 
     zend_object_std_init(&intern->std, ce);
     object_properties_init(&intern->std, ce);
+    intern->std.handlers = &clickhouse_client_options_handlers;
 
     return &intern->std;
 }
@@ -174,7 +175,7 @@ void php_clickhouse_register_client_options(int module_number)
     clickhouse_ce_ClientOptions = zend_register_internal_class(&ce);
     clickhouse_ce_ClientOptions->ce_flags |= ZEND_ACC_FINAL;
     clickhouse_ce_ClientOptions->create_object = php_clickhouse_client_options_create;
-#if PHP_VERSION_ID >= 80200
+#if PHP_VERSION_ID >= 80300
     clickhouse_ce_ClientOptions->default_object_handlers = &clickhouse_client_options_handlers;
 #endif
 
@@ -244,7 +245,7 @@ void php_clickhouse_register_server_info(int module_number)
 
     INIT_NS_CLASS_ENTRY(ce, "ClickHouse\\Driver", "ServerInfo", NULL);
     clickhouse_ce_ServerInfo = zend_register_internal_class(&ce);
-#if PHP_VERSION_ID >= 80200
+#if PHP_VERSION_ID >= 80300
     clickhouse_ce_ServerInfo->ce_flags |= ZEND_ACC_READONLY_CLASS;
 #endif
 

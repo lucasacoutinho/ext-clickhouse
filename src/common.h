@@ -50,7 +50,7 @@ void php_clickhouse_throw_exception(const char *message, zend_class_entry *ce);
     }
 
 /* PHP 8.1 compat: zend_enum_get_case_by_value was added in 8.2 */
-#if PHP_VERSION_ID < 80200
+#if PHP_VERSION_ID < 80300
 static inline zend_result php_clickhouse_enum_get_case(zend_object **result, zend_class_entry *ce, zend_long value) {
     zend_string *cases_name = zend_string_init("cases", sizeof("cases") - 1, 0);
     zend_function *cases_fn = static_cast<zend_function *>(zend_hash_find_ptr(&ce->function_table, cases_name));

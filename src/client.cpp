@@ -19,6 +19,7 @@ static zend_object *php_clickhouse_client_create(zend_class_entry *ce)
 
     zend_object_std_init(&intern->std, ce);
     object_properties_init(&intern->std, ce);
+    intern->std.handlers = &clickhouse_client_handlers;
 
     return &intern->std;
 }
@@ -525,7 +526,7 @@ void php_clickhouse_register_client(int module_number)
     clickhouse_ce_Client = zend_register_internal_class(&ce);
     clickhouse_ce_Client->ce_flags |= ZEND_ACC_FINAL;
     clickhouse_ce_Client->create_object = php_clickhouse_client_create;
-#if PHP_VERSION_ID >= 80200
+#if PHP_VERSION_ID >= 80300
     clickhouse_ce_Client->default_object_handlers = &clickhouse_client_handlers;
 #endif
 

@@ -17,6 +17,7 @@ static zend_object *php_clickhouse_column_create(zend_class_entry *ce)
 
     zend_object_std_init(&intern->std, ce);
     object_properties_init(&intern->std, ce);
+    intern->std.handlers = &clickhouse_column_handlers;
 
     return &intern->std;
 }
@@ -85,7 +86,7 @@ ZEND_METHOD(ClickHouse_Driver_Column, getType)
     zend_long code = static_cast<zend_long>(intern->column->Type()->GetCode());
 
     zend_object *enum_obj = nullptr;
-#if PHP_VERSION_ID >= 80200
+#if PHP_VERSION_ID >= 80300
     if (zend_enum_get_case_by_value(&enum_obj, clickhouse_ce_Type, code, nullptr, false) == SUCCESS && enum_obj) {
 #else
     if (php_clickhouse_enum_get_case(&enum_obj, clickhouse_ce_Type, code) == SUCCESS && enum_obj) {
@@ -169,7 +170,7 @@ void php_clickhouse_register_column(int module_number)
     clickhouse_ce_Column = zend_register_internal_class(&ce);
     clickhouse_ce_Column->ce_flags |= ZEND_ACC_FINAL;
     clickhouse_ce_Column->create_object = php_clickhouse_column_create;
-#if PHP_VERSION_ID >= 80200
+#if PHP_VERSION_ID >= 80300
     clickhouse_ce_Column->default_object_handlers = &clickhouse_column_handlers;
 #endif
 
