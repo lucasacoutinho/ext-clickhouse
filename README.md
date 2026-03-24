@@ -9,7 +9,7 @@ A PHP extension providing native TCP access to ClickHouse using the [clickhouse-
 ## Build
 
 ```bash
-git clone --recursive https://github.com/<owner>/ext-clickhouse.git
+git clone --recursive https://github.com/lightprofco/ext-clickhouse.git
 cd ext-clickhouse
 
 phpize
@@ -72,7 +72,7 @@ $client->selectByBlock('SELECT * FROM test', function (Block $block): void {
 Pre-built images are available on GitHub Container Registry:
 
 ```bash
-docker pull ghcr.io/<owner>/ext-clickhouse:php8.4-latest
+docker pull ghcr.io/lightprofco/ext-clickhouse:php8.4-latest
 ```
 
 Or build locally:
