@@ -18,6 +18,8 @@
 #include "clickhouse/columns/uuid.h"
 #include "clickhouse/types/types.h"
 
+#include "absl/numeric/int128.h"
+
 #include <cstdio>
 #include <cstring>
 #include <cinttypes>
@@ -238,9 +240,44 @@ static void ipv6_to_zval(const ColumnRef &col, size_t index, zval *rv) {
 }
 
 static void decimal_to_zval(const ColumnRef &col, size_t index, zval *rv) {
-    /* Return as string to preserve precision */
-    auto item = col->GetItem(index);
-    std::string str(item.get<std::string_view>());
+    /* Return as string to preserve precision.
+     * ColumnDecimal::At() returns the raw Int128 scaled integer.
+     * We format it as "integer_part.fractional_part" using the column's scale. */
+    auto typed = col->As<ColumnDecimal>();
+    if (!typed) { ZVAL_NULL(rv); return; }
+
+    Int128 raw = typed->At(index);
+    size_t scale = typed->GetScale();
+
+    if (scale == 0) {
+        std::ostringstream oss;
+        oss << raw;
+        std::string str = oss.str();
+        ZVAL_STRINGL(rv, str.c_str(), str.size());
+        return;
+    }
+
+    Int128 divisor = 1;
+    for (size_t i = 0; i < scale; ++i) divisor *= 10;
+
+    bool negative = (raw < 0);
+    if (negative) raw = -raw;
+
+    Int128 integer_part = raw / divisor;
+    Int128 frac_part = raw % divisor;
+
+    std::ostringstream oss;
+    if (negative) oss << '-';
+    oss << integer_part << '.';
+
+    /* Pad fractional part with leading zeros to match scale */
+    std::ostringstream foss;
+    foss << frac_part;
+    std::string frac_str = foss.str();
+    for (size_t i = frac_str.size(); i < scale; ++i) oss << '0';
+    oss << frac_str;
+
+    std::string str = oss.str();
     ZVAL_STRINGL(rv, str.c_str(), str.size());
 }
 
@@ -332,9 +369,75 @@ static void point_to_zval(const ColumnRef &col, size_t index, zval *rv) {
     add_next_index_double(rv, std::get<1>(pt));
 }
 
-/* Ring = Array(Point), Polygon = Array(Ring), MultiPolygon = Array(Polygon)
- * These are ColumnGeo<ColumnArrayT<...>> types. Their At() returns an ArrayValueView.
- * We convert using the generic Geo approach: recursively extract via GetAsColumn-like patterns. */
+/* Ring = Array(Point), Polygon = Array(Ring), MultiPolygon = Array(Polygon).
+ * ColumnGeo<T> inherits from Column (NOT from T), so As<ColumnArray>() fails.
+ * Use the typed At() which returns ArrayValueView with size()/iterators. */
+
+static void ring_to_zval(const ColumnRef &col, size_t index, zval *rv) {
+    auto typed = col->As<ColumnRing>();
+    if (!typed) { ZVAL_NULL(rv); return; }
+
+    auto view = typed->At(index);
+    array_init_size(rv, view.size());
+    for (size_t i = 0; i < view.size(); ++i) {
+        auto pt = view[i]; /* std::tuple<double, double> */
+        zval elem;
+        array_init_size(&elem, 2);
+        add_next_index_double(&elem, std::get<0>(pt));
+        add_next_index_double(&elem, std::get<1>(pt));
+        add_next_index_zval(rv, &elem);
+    }
+}
+
+static void polygon_to_zval(const ColumnRef &col, size_t index, zval *rv) {
+    auto typed = col->As<ColumnPolygon>();
+    if (!typed) { ZVAL_NULL(rv); return; }
+
+    auto view = typed->At(index); /* ArrayValueView of rings */
+    array_init_size(rv, view.size());
+    for (size_t i = 0; i < view.size(); ++i) {
+        auto ring_view = view[i]; /* ArrayValueView of points */
+        zval ring_arr;
+        array_init_size(&ring_arr, ring_view.size());
+        for (size_t j = 0; j < ring_view.size(); ++j) {
+            auto pt = ring_view[j];
+            zval elem;
+            array_init_size(&elem, 2);
+            add_next_index_double(&elem, std::get<0>(pt));
+            add_next_index_double(&elem, std::get<1>(pt));
+            add_next_index_zval(&ring_arr, &elem);
+        }
+        add_next_index_zval(rv, &ring_arr);
+    }
+}
+
+static void multipolygon_to_zval(const ColumnRef &col, size_t index, zval *rv) {
+    auto typed = col->As<ColumnMultiPolygon>();
+    if (!typed) { ZVAL_NULL(rv); return; }
+
+    auto view = typed->At(index); /* ArrayValueView of polygons */
+    array_init_size(rv, view.size());
+    for (size_t i = 0; i < view.size(); ++i) {
+        auto poly_view = view[i]; /* ArrayValueView of rings */
+        zval poly_arr;
+        array_init_size(&poly_arr, poly_view.size());
+        for (size_t j = 0; j < poly_view.size(); ++j) {
+            auto ring_view = poly_view[j]; /* ArrayValueView of points */
+            zval ring_arr;
+            array_init_size(&ring_arr, ring_view.size());
+            for (size_t k = 0; k < ring_view.size(); ++k) {
+                auto pt = ring_view[k];
+                zval elem;
+                array_init_size(&elem, 2);
+                add_next_index_double(&elem, std::get<0>(pt));
+                add_next_index_double(&elem, std::get<1>(pt));
+                add_next_index_zval(&ring_arr, &elem);
+            }
+            add_next_index_zval(&poly_arr, &ring_arr);
+        }
+        add_next_index_zval(rv, &poly_arr);
+    }
+}
 
 void php_clickhouse_column_to_zval(const ColumnRef &col, size_t index, zval *return_value)
 {
@@ -381,13 +484,10 @@ void php_clickhouse_column_to_zval(const ColumnRef &col, size_t index, zval *ret
 
         case Type::LowCardinality: lowcardinality_to_zval(col, index, return_value); break;
 
-        case Type::Point: point_to_zval(col, index, return_value); break;
-        case Type::Ring:
-        case Type::Polygon:
-        case Type::MultiPolygon:
-            /* Geo types are stored as nested Arrays — use array converter */
-            array_to_zval(col, index, return_value);
-            break;
+        case Type::Point:        point_to_zval(col, index, return_value); break;
+        case Type::Ring:         ring_to_zval(col, index, return_value); break;
+        case Type::Polygon:      polygon_to_zval(col, index, return_value); break;
+        case Type::MultiPolygon: multipolygon_to_zval(col, index, return_value); break;
 
         default:
             /* Unknown type — return string representation via ItemView */

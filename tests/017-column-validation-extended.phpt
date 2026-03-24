@@ -37,13 +37,11 @@ var_dump($inner[0]);
 echo "Nested[0][1]: ";
 var_dump($inner[1]);
 
-// --- Nullable(Nullable(...)) is not a valid ClickHouse type ---
-try {
-    Column::create('Nullable(Nullable(String))', ['test']);
-    echo "FAIL: should not accept Nullable(Nullable(...))\n";
-} catch (\Throwable $e) {
-    echo "OK: double Nullable rejected\n";
-}
+// --- Nullable(Nullable(...)) ---
+// clickhouse-cpp's CreateColumnByType accepts this (nested nullable),
+// though ClickHouse server would reject it in a CREATE TABLE.
+$col = Column::create('Nullable(Nullable(String))', ['test']);
+echo "Nullable(Nullable) size: " . $col->size() . "\n";
 
 // --- Map with integer keys ---
 $col = Column::create('Map(UInt32, String)', [[1 => 'one', 2 => 'two']]);
@@ -128,7 +126,7 @@ Nested[0][1]: array(1) {
   [0]=>
   int(3)
 }
-OK: double Nullable rejected
+Nullable(Nullable) size: 1
 
 Map(UInt32, String) size: 1
 Map[0] entries: 2
