@@ -24,7 +24,7 @@ echo "OK\n";
 ?>
 --EXPECTF--
 int(3)
-string(%d) "Decimal(18,%s4)"
+string(%d) "Decimal(18,4)"
 int(0)
 int(1704067200)
 int(2)

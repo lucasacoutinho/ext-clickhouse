@@ -84,9 +84,12 @@ ZEND_METHOD(ClickHouse_Driver_Column, getType)
 
     zend_long code = static_cast<zend_long>(intern->column->Type()->GetCode());
 
-    /* Look up the enum case by value (PHP 8.3 API) */
     zend_object *enum_obj = nullptr;
+#if PHP_VERSION_ID >= 80200
     if (zend_enum_get_case_by_value(&enum_obj, clickhouse_ce_Type, code, nullptr, false) == SUCCESS && enum_obj) {
+#else
+    if (php_clickhouse_enum_get_case(&enum_obj, clickhouse_ce_Type, code) == SUCCESS && enum_obj) {
+#endif
         RETURN_OBJ_COPY(enum_obj);
     }
     RETURN_NULL();
