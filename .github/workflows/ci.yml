@@ -33,7 +33,7 @@ jobs:
           make -j$(nproc)
 
       - name: Upload extension
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: clickhouse-php${{ matrix.php-version }}
           path: modules/clickhouse.so
