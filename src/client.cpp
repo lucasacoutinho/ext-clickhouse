@@ -398,77 +398,6 @@ ZEND_METHOD(ClickHouse_Driver_Client, insert)
     CLICKHOUSE_CATCH
 }
 
-ZEND_METHOD(ClickHouse_Driver_Client, prepareInsert)
-{
-    zend_string *query = nullptr;
-    zend_string *query_id = nullptr;
-
-    ZEND_PARSE_PARAMETERS_START(1, 2)
-        Z_PARAM_STR(query)
-        Z_PARAM_OPTIONAL
-        Z_PARAM_STR_OR_NULL(query_id)
-    ZEND_PARSE_PARAMETERS_END();
-
-    auto *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
-    if (!intern->client) {
-        zend_throw_exception(clickhouse_ce_ClickHouseException, "Client not connected", 0);
-        return;
-    }
-
-    CLICKHOUSE_TRY
-        std::string sql(ZSTR_VAL(query), ZSTR_LEN(query));
-        clickhouse::Block cpp_block;
-        if (query_id) {
-            cpp_block = intern->client->BeginInsert(sql,
-                std::string(ZSTR_VAL(query_id), ZSTR_LEN(query_id)));
-        } else {
-            cpp_block = intern->client->BeginInsert(sql);
-        }
-
-        php_clickhouse_create_block_from_cpp(return_value, cpp_block);
-    CLICKHOUSE_CATCH_RETURN
-}
-
-ZEND_METHOD(ClickHouse_Driver_Client, sendBlock)
-{
-    zval *block_zv = nullptr;
-
-    ZEND_PARSE_PARAMETERS_START(1, 1)
-        Z_PARAM_OBJECT_OF_CLASS(block_zv, clickhouse_ce_Block)
-    ZEND_PARSE_PARAMETERS_END();
-
-    auto *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
-    if (!intern->client) {
-        zend_throw_exception(clickhouse_ce_ClickHouseException, "Client not connected", 0);
-        return;
-    }
-
-    auto *block_intern = php_clickhouse_block_from_zval(block_zv);
-    if (!block_intern->block) {
-        zend_throw_exception(clickhouse_ce_ValidationException, "Block not initialized", 0);
-        return;
-    }
-
-    CLICKHOUSE_TRY
-        intern->client->SendInsertBlock(*block_intern->block);
-    CLICKHOUSE_CATCH
-}
-
-ZEND_METHOD(ClickHouse_Driver_Client, endInsert)
-{
-    ZEND_PARSE_PARAMETERS_NONE();
-
-    auto *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
-    if (!intern->client) {
-        zend_throw_exception(clickhouse_ce_ClickHouseException, "Client not connected", 0);
-        return;
-    }
-
-    CLICKHOUSE_TRY
-        intern->client->EndInsert();
-    CLICKHOUSE_CATCH
-}
-
 ZEND_METHOD(ClickHouse_Driver_Client, ping)
 {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -579,9 +508,6 @@ static const zend_function_entry class_ClickHouse_Driver_Client_methods[] = {
     ZEND_ME(ClickHouse_Driver_Client, selectByBlock, arginfo_class_ClickHouse_Driver_Client_selectByBlock, ZEND_ACC_PUBLIC)
     ZEND_ME(ClickHouse_Driver_Client, insert, arginfo_class_ClickHouse_Driver_Client_insert, ZEND_ACC_PUBLIC)
     ZEND_ME(ClickHouse_Driver_Client, selectWithExternalData, arginfo_class_ClickHouse_Driver_Client_selectWithExternalData, ZEND_ACC_PUBLIC)
-    ZEND_ME(ClickHouse_Driver_Client, prepareInsert, arginfo_class_ClickHouse_Driver_Client_prepareInsert, ZEND_ACC_PUBLIC)
-    ZEND_ME(ClickHouse_Driver_Client, sendBlock, arginfo_class_ClickHouse_Driver_Client_sendBlock, ZEND_ACC_PUBLIC)
-    ZEND_ME(ClickHouse_Driver_Client, endInsert, arginfo_class_ClickHouse_Driver_Client_endInsert, ZEND_ACC_PUBLIC)
     ZEND_ME(ClickHouse_Driver_Client, ping, arginfo_class_ClickHouse_Driver_Client_ping, ZEND_ACC_PUBLIC)
     ZEND_ME(ClickHouse_Driver_Client, resetConnection, arginfo_class_ClickHouse_Driver_Client_resetConnection, ZEND_ACC_PUBLIC)
     ZEND_ME(ClickHouse_Driver_Client, resetConnectionEndpoint, arginfo_class_ClickHouse_Driver_Client_resetConnectionEndpoint, ZEND_ACC_PUBLIC)
@@ -599,7 +525,9 @@ void php_clickhouse_register_client(int module_number)
     clickhouse_ce_Client = zend_register_internal_class(&ce);
     clickhouse_ce_Client->ce_flags |= ZEND_ACC_FINAL;
     clickhouse_ce_Client->create_object = php_clickhouse_client_create;
+#if PHP_VERSION_ID >= 80200
     clickhouse_ce_Client->default_object_handlers = &clickhouse_client_handlers;
+#endif
 
     memcpy(&clickhouse_client_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     clickhouse_client_handlers.offset = XtOffsetOf(php_clickhouse_client, std);

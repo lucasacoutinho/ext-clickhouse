@@ -166,7 +166,9 @@ void php_clickhouse_register_column(int module_number)
     clickhouse_ce_Column = zend_register_internal_class(&ce);
     clickhouse_ce_Column->ce_flags |= ZEND_ACC_FINAL;
     clickhouse_ce_Column->create_object = php_clickhouse_column_create;
+#if PHP_VERSION_ID >= 80200
     clickhouse_ce_Column->default_object_handlers = &clickhouse_column_handlers;
+#endif
 
     memcpy(&clickhouse_column_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     clickhouse_column_handlers.offset = XtOffsetOf(php_clickhouse_column, std);

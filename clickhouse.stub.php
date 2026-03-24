@@ -103,12 +103,6 @@ final class Client {
 
     public function insert(string $tableName, Block $block, ?string $queryId = null): void {}
 
-    public function prepareInsert(string $query, ?string $queryId = null): Block {}
-
-    public function sendBlock(Block $block): void {}
-
-    public function endInsert(): void {}
-
     /**
      * Execute SELECT with external temporary tables.
      * @param array<array{name: string, data: Block}> $externalTables

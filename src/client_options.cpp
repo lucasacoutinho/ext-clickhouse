@@ -174,7 +174,9 @@ void php_clickhouse_register_client_options(int module_number)
     clickhouse_ce_ClientOptions = zend_register_internal_class(&ce);
     clickhouse_ce_ClientOptions->ce_flags |= ZEND_ACC_FINAL;
     clickhouse_ce_ClientOptions->create_object = php_clickhouse_client_options_create;
+#if PHP_VERSION_ID >= 80200
     clickhouse_ce_ClientOptions->default_object_handlers = &clickhouse_client_options_handlers;
+#endif
 
     memcpy(&clickhouse_client_options_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     clickhouse_client_options_handlers.offset = XtOffsetOf(php_clickhouse_client_options, std);
