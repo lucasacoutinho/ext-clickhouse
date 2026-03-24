@@ -18,8 +18,9 @@ $client = clickhouse_test_client();
 $block = new Block();
 $block->appendColumn('id', Column::create('UInt64', [1, 3, 5, 7]));
 
+// Use a subquery to bound the scan — system.numbers is infinite
 $rows = $client->selectWithExternalData(
-    'SELECT number FROM system.numbers WHERE number IN (SELECT id FROM _ext_ids) LIMIT 10',
+    'SELECT number FROM (SELECT number FROM system.numbers LIMIT 100) sub WHERE number IN (SELECT id FROM _ext_ids)',
     [['name' => '_ext_ids', 'data' => $block]]
 );
 
