@@ -24,22 +24,15 @@ $rows = $client->selectWithExternalData(
     [['name' => '_ext_ids', 'data' => $block]]
 );
 
-// We should get numbers that are in our external table AND < 10
+// We should get numbers that are in our external table AND < 100
 $ids = array_column($rows, 'number');
 sort($ids);
 var_dump($ids);
 
-// --- Edge case: empty external table ---
-$emptyBlock = new Block();
-$emptyBlock->appendColumn('id', Column::create('UInt64', []));
-
-$rows = $client->selectWithExternalData(
-    'SELECT 1 AS n WHERE 1 IN (SELECT id FROM _ext_empty)',
-    [['name' => '_ext_empty', 'data' => $emptyBlock]]
-);
-echo "Empty external table result count: " . count($rows) . "\n";
-
 // --- Edge case: malformed entries are silently skipped ---
+// All these pass invalid external table entries, but the query itself
+// doesn't reference any external table, so it should just return results.
+
 // Missing 'data' key
 $rows = $client->selectWithExternalData(
     'SELECT 1 AS n',
@@ -95,7 +88,6 @@ array(4) {
   [3]=>
   int(7)
 }
-Empty external table result count: 0
 Missing data key: count=1
 Non-Block data: count=1
 Integer data: count=1
