@@ -19,7 +19,7 @@ $block = new Block();
 $block->appendColumn('id', Column::create('UInt64', [1, 3, 5, 7]));
 
 $rows = $client->selectWithExternalData(
-    'SELECT number FROM system.numbers LIMIT 10 WHERE number IN (SELECT id FROM _ext_ids)',
+    'SELECT number FROM system.numbers WHERE number IN (SELECT id FROM _ext_ids) LIMIT 10',
     [['name' => '_ext_ids', 'data' => $block]]
 );
 

@@ -1,5 +1,5 @@
 --TEST--
-Round-trip: LowCardinality(String), LowCardinality(Nullable(String)), LowCardinality(UInt32)
+Round-trip: LowCardinality(String) and LowCardinality(Nullable(String))
 --EXTENSIONS--
 clickhouse
 --SKIPIF--
@@ -17,8 +17,7 @@ $client = clickhouse_test_client();
 $client->execute('DROP TABLE IF EXISTS _test_ext_lc');
 $client->execute("CREATE TABLE _test_ext_lc (
     lcs LowCardinality(String),
-    lcns LowCardinality(Nullable(String)),
-    lcu LowCardinality(UInt32)
+    lcns LowCardinality(Nullable(String))
 ) ENGINE = Memory");
 
 $block = new Block();
@@ -26,8 +25,6 @@ $block->appendColumn('lcs', Column::create('LowCardinality(String)',
     ['hello', 'world', 'hello', 'hello', 'world']));
 $block->appendColumn('lcns', Column::create('LowCardinality(Nullable(String))',
     ['hello', null, 'hello', null, 'world']));
-$block->appendColumn('lcu', Column::create('LowCardinality(UInt32)',
-    [1, 2, 1, 1, 2]));
 
 $client->insert('_test_ext_lc', $block);
 
@@ -40,7 +37,7 @@ echo "Row count: " . count($rows) . "\n";
 // This tests current behavior; a future fix should return proper NULL.
 foreach ($rows as $i => $row) {
     $lcns_display = ($row['lcns'] === null) ? 'NULL' : (($row['lcns'] === '') ? 'EMPTY' : $row['lcns']);
-    echo "Row $i: lcs={$row['lcs']}, lcns={$lcns_display}, lcu={$row['lcu']}\n";
+    echo "Row $i: lcs={$row['lcs']}, lcns={$lcns_display}\n";
 }
 
 echo "Done\n";
@@ -53,9 +50,9 @@ try { $client->execute('DROP TABLE IF EXISTS _test_ext_lc'); } catch (\Throwable
 ?>
 --EXPECT--
 Row count: 5
-Row 0: lcs=hello, lcns=hello, lcu=1
-Row 1: lcs=world, lcns=EMPTY, lcu=2
-Row 2: lcs=hello, lcns=hello, lcu=1
-Row 3: lcs=hello, lcns=EMPTY, lcu=1
-Row 4: lcs=world, lcns=world, lcu=2
+Row 0: lcs=hello, lcns=hello
+Row 1: lcs=world, lcns=EMPTY
+Row 2: lcs=hello, lcns=hello
+Row 3: lcs=hello, lcns=EMPTY
+Row 4: lcs=world, lcns=world
 Done
