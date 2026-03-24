@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['8.1', '8.2', '8.3', '8.4']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          tools: phpize
+
+      - name: Build extension
+        run: |
+          phpize
+          ./configure --enable-clickhouse
+          make -j$(nproc)
+
+      - name: Upload extension
+        uses: actions/upload-artifact@v4
+        with:
+          name: clickhouse-php${{ matrix.php-version }}
+          path: modules/clickhouse.so
+
+      # Unit tests don't need a ClickHouse server (tests 0xx)
+      - name: Run unit tests
+        run: |
+          TEST_PHP_EXECUTABLE=$(which php) \
+            php run-tests.php -d extension=modules/clickhouse.so \
+            --show-diff -q tests/0*.phpt
+
+  integration-tests:
+    needs: build
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['8.1', '8.2', '8.3', '8.4']
+
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:24
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "clickhouse-client --query 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          tools: phpize
+
+      - name: Download extension
+        uses: actions/download-artifact@v4
+        with:
+          name: clickhouse-php${{ matrix.php-version }}
+          path: modules/
+
+      # Integration tests need a running ClickHouse server (tests 1xx)
+      - name: Run integration tests
+        env:
+          CLICKHOUSE_HOST: 127.0.0.1
+          CLICKHOUSE_PORT: '9000'
+        run: |
+          TEST_PHP_EXECUTABLE=$(which php) \
+            php run-tests.php -d extension=modules/clickhouse.so \
+            --show-diff -q tests/1*.phpt

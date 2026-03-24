@@ -1,0 +1,41 @@
+# phpize / configure / make output
+/configure
+/configure~
+/config.nice
+/config.h
+/config.h.in
+/config.log
+/config.status
+/Makefile
+/Makefile.global
+/Makefile.objects
+/Makefile.fragments
+/libtool
+/modules/
+/autom4te.cache/
+
+# Compiled objects & libraries
+*.o
+*.lo
+*.la
+.libs/
+*.so
+*.dylib
+
+# PHP test runner (obtain from php-src or via `make test`)
+/run-tests.php
+
+# Test artifacts
+*.diff
+*.exp
+*.out
+*.mem
+/tmp-php.ini
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
