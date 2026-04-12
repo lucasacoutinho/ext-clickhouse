@@ -41,7 +41,17 @@ if test "$PHP_CLICKHOUSE" != "no"; then
     src/column_write.cpp \
     src/error_codes.cpp"
 
-  CLICKHOUSE_COMMON_FLAGS="-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1"
+  dnl OpenSSL for TLS connections (e.g., ClickHouse Cloud on port 9440)
+  PKG_CHECK_MODULES([OPENSSL], [openssl >= 1.1.0], [
+    PHP_EVAL_INCLINE($OPENSSL_CFLAGS)
+    PHP_EVAL_LIBLINE($OPENSSL_LIBS, CLICKHOUSE_SHARED_LIBADD)
+    CLICKHOUSE_OPENSSL_FLAGS="-DWITH_OPENSSL=1"
+  ], [
+    AC_MSG_WARN([OpenSSL not found — building without TLS support])
+    CLICKHOUSE_OPENSSL_FLAGS=""
+  ])
+
+  CLICKHOUSE_COMMON_FLAGS="-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 $CLICKHOUSE_OPENSSL_FLAGS"
 
   PHP_NEW_EXTENSION([clickhouse],
     [$PHP_CLICKHOUSE_SOURCES],
@@ -80,7 +90,13 @@ if test "$PHP_CLICKHOUSE" != "no"; then
     clickhouse-cpp/clickhouse/client.cpp \
     clickhouse-cpp/clickhouse/query.cpp"
 
-  CLICKHOUSE_CPP_CXX_FLAGS="$PHP_CLICKHOUSE_STDCXX -Wno-write-strings"
+  dnl Add SSL socket source when OpenSSL is available
+  if test -n "$CLICKHOUSE_OPENSSL_FLAGS"; then
+    CLICKHOUSE_CPP_CXX_SOURCES="$CLICKHOUSE_CPP_CXX_SOURCES \
+      clickhouse-cpp/clickhouse/base/sslsocket.cpp"
+  fi
+
+  CLICKHOUSE_CPP_CXX_FLAGS="$PHP_CLICKHOUSE_STDCXX -Wno-write-strings $CLICKHOUSE_OPENSSL_FLAGS"
 
   AS_VAR_IF([ext_shared], [no],
     [PHP_ADD_SOURCES([$ext_dir],
