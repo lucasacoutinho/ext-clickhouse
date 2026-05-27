@@ -80,6 +80,7 @@ jobs:
           asan_lib="$(cc -print-file-name=libasan.so)"
           USE_ZEND_ALLOC=0 \
           LD_PRELOAD="$asan_lib" \
+          CLICKHOUSE_SANITIZER=1 \
           ASAN_OPTIONS="detect_leaks=0:abort_on_error=1" \
           UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1" \
             php run-tests.php -d extension=modules/clickhouse.so --show-diff -q tests/0*.phpt

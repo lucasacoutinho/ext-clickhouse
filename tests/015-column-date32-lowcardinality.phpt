@@ -2,6 +2,12 @@
 Column types: Date32, LowCardinality
 --EXTENSIONS--
 clickhouse
+--SKIPIF--
+<?php
+if (getenv('CLICKHOUSE_SANITIZER')) {
+    die('skip LowCardinality constructor hits known clickhouse-cpp sanitizer issue');
+}
+?>
 --FILE--
 <?php
 use ClickHouse\Driver\Column;

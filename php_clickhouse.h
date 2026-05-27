@@ -14,7 +14,7 @@ extern "C" {
 #endif
 }
 
-#define PHP_CLICKHOUSE_VERSION "1.0.0"
+#define PHP_CLICKHOUSE_VERSION "1.0.1"
 #define PHP_CLICKHOUSE_EXTNAME "clickhouse"
 
 #ifndef ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE
