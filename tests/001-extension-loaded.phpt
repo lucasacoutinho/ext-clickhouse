@@ -4,6 +4,8 @@ Extension is loaded and classes exist
 clickhouse
 --FILE--
 <?php
+require __DIR__ . '/clickhouse_compat.inc';
+
 var_dump(extension_loaded('clickhouse'));
 
 // Core classes
@@ -13,9 +15,9 @@ var_dump(class_exists('ClickHouse\Driver\Block'));
 var_dump(class_exists('ClickHouse\Driver\Column'));
 var_dump(class_exists('ClickHouse\Driver\ServerInfo'));
 
-// Enums
-var_dump(enum_exists('ClickHouse\Driver\CompressionMethod'));
-var_dump(enum_exists('ClickHouse\Driver\Type'));
+// Native enums on PHP 8.1+, constant classes on older supported versions.
+var_dump(clickhouse_enum_like_exists('ClickHouse\Driver\CompressionMethod'));
+var_dump(clickhouse_enum_like_exists('ClickHouse\Driver\Type'));
 
 // Exceptions
 var_dump(class_exists('ClickHouse\Driver\Exception\ClickHouseException'));

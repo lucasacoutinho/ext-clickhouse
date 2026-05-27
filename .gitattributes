@@ -1,0 +1,15 @@
+/autom4te.cache export-ignore
+/modules export-ignore
+/.libs export-ignore
+/dist export-ignore
+/config.h export-ignore
+/config.log export-ignore
+/config.nice export-ignore
+/config.status export-ignore
+/configure export-ignore
+/configure~ export-ignore
+/libtool export-ignore
+/Makefile export-ignore
+/Makefile.fragments export-ignore
+/Makefile.objects export-ignore
+/run-tests.php export-ignore

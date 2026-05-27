@@ -5,7 +5,7 @@ PHP_ARG_ENABLE([clickhouse],
   [whether to enable ClickHouse native driver],
   [AS_HELP_STRING([--enable-clickhouse],
     [Enable ClickHouse native driver extension])],
-  [no])
+  [yes])
 
 if test "$PHP_CLICKHOUSE" != "no"; then
 
@@ -183,6 +183,81 @@ if test "$PHP_CLICKHOUSE" != "no"; then
   PHP_ADD_BUILD_DIR([$ext_builddir/clickhouse-cpp/contrib/zstd/zstd/decompress])
   PHP_ADD_BUILD_DIR([$ext_builddir/clickhouse-cpp/contrib/zstd/zstd/dictBuilder])
   PHP_ADD_BUILD_DIR([$ext_builddir/clickhouse-cpp/contrib/zstd/zstd/legacy])
+
+  PHP_INSTALL_HEADERS([ext/clickhouse], [
+    php_clickhouse.h
+    src/column_convert.h
+  ])
+  PHP_INSTALL_HEADERS([ext/clickhouse/clickhouse-cpp/clickhouse], [
+    block.h
+    client.h
+    error_codes.h
+    exceptions.h
+    protocol.h
+    query.h
+    server_exception.h
+    version.h
+  ])
+  PHP_INSTALL_HEADERS([ext/clickhouse/clickhouse-cpp/clickhouse/base], [
+    buffer.h
+    compressed.h
+    endpoints_iterator.h
+    input.h
+    open_telemetry.h
+    output.h
+    platform.h
+    projected_iterator.h
+    singleton.h
+    socket.h
+    sslsocket.h
+    string_utils.h
+    string_view.h
+    uuid.h
+    wire_format.h
+  ])
+  PHP_INSTALL_HEADERS([ext/clickhouse/clickhouse-cpp/clickhouse/columns], [
+    array.h
+    column.h
+    date.h
+    decimal.h
+    enum.h
+    factory.h
+    geo.h
+    ip4.h
+    ip6.h
+    itemview.h
+    lowcardinality.h
+    lowcardinalityadaptor.h
+    map.h
+    nothing.h
+    nullable.h
+    numeric.h
+    string.h
+    tuple.h
+    utils.h
+    uuid.h
+  ])
+  PHP_INSTALL_HEADERS([ext/clickhouse/clickhouse-cpp/clickhouse/types], [
+    type_parser.h
+    types.h
+  ])
+  PHP_INSTALL_HEADERS([ext/clickhouse/clickhouse-cpp/contrib/absl/absl/base], [
+    attributes.h
+    config.h
+    macros.h
+    optimization.h
+    options.h
+    policy_checks.h
+    port.h
+  ])
+  PHP_INSTALL_HEADERS([ext/clickhouse/clickhouse-cpp/contrib/absl/absl/base/internal], [
+    bits.h
+  ])
+  PHP_INSTALL_HEADERS([ext/clickhouse/clickhouse-cpp/contrib/absl/absl/numeric], [
+    int128.h
+    int128_have_intrinsic.inc
+    int128_no_intrinsic.inc
+  ])
 
   PHP_ADD_LIBRARY(stdc++, 1, CLICKHOUSE_SHARED_LIBADD)
   PHP_ADD_LIBRARY(pthread, 1, CLICKHOUSE_SHARED_LIBADD)

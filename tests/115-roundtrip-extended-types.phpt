@@ -42,7 +42,7 @@ echo "Row count: " . count($rows) . "\n";
 
 // Row 0 (fs='hello\0\0\0')
 echo "\n--- Row 0 ---\n";
-echo "fs starts with 'hello': " . (str_starts_with($rows[0]['fs'], 'hello') ? 'yes' : 'no') . "\n";
+echo "fs starts with 'hello': " . (substr($rows[0]['fs'], 0, 5) === 'hello' ? 'yes' : 'no') . "\n";
 echo "fs length: " . strlen($rows[0]['fs']) . "\n";
 echo "e8: " . $rows[0]['e8'] . "\n";
 echo "e16: " . $rows[0]['e16'] . "\n";

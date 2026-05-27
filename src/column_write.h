@@ -9,8 +9,6 @@
  * This is the INSERT write path: PHP → ClickHouse.
  * Throws PHP ValidationException on type mismatch.
  */
-void php_clickhouse_zval_to_column(
-    clickhouse::ColumnRef &col,
-    zval *value);
+void php_clickhouse_zval_to_column(clickhouse::ColumnRef &col, zval *value);
 
 #endif

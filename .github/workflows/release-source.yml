@@ -1,0 +1,50 @@
+name: Release Source Package
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  package-source:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Build PIE source package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          package_dir="clickhouse-$version"
+          git submodule update --init --recursive
+          rm -rf dist
+          mkdir -p "dist" "$RUNNER_TEMP/$package_dir"
+          tar \
+            --exclude-vcs \
+            --exclude='./autom4te.cache' \
+            --exclude='./modules' \
+            --exclude='./.libs' \
+            --exclude='./dist' \
+            --exclude='./config.h' \
+            --exclude='./config.log' \
+            --exclude='./config.nice' \
+            --exclude='./config.status' \
+            --exclude='./configure' \
+            --exclude='./configure~' \
+            --exclude='./libtool' \
+            --exclude='./Makefile' \
+            --exclude='./Makefile.fragments' \
+            --exclude='./Makefile.objects' \
+            --exclude='./run-tests.php' \
+            -cf - . | tar -xf - -C "$RUNNER_TEMP/$package_dir"
+          tar -C "$RUNNER_TEMP" -czf "dist/php_clickhouse-$version-src.tgz" "$package_dir"
+
+      - name: Upload source package
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/php_clickhouse-*-src.tgz

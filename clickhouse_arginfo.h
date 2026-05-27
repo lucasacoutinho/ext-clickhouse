@@ -8,7 +8,11 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_ClickHouse_Driver_ClientOptions___construct
     ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, database, IS_STRING, 0, "\"default\"")
     ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, user, IS_STRING, 0, "\"default\"")
     ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, password, IS_STRING, 0, "\"\"")
+#if PHP_VERSION_ID >= 80100
     ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, compression, ClickHouse\\Driver\\CompressionMethod, 0, "ClickHouse\\Driver\\CompressionMethod::None")
+#else
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, compression, IS_LONG, 0, "ClickHouse\\Driver\\CompressionMethod::None")
+#endif
     ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, pingBeforeQuery, _IS_BOOL, 0, "false")
     ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, sendRetries, IS_LONG, 0, "1")
     ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, retryTimeoutSeconds, IS_LONG, 0, "5")
@@ -95,7 +99,11 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_Driver_Block_ge
     ZEND_ARG_TYPE_INFO(0, index, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
+#if PHP_VERSION_ID >= 80100
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_ClickHouse_Driver_Block_getColumnType, 0, 1, ClickHouse\\Driver\\Type, 0)
+#else
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_Driver_Block_getColumnType, 0, 1, IS_LONG, 0)
+#endif
     ZEND_ARG_TYPE_INFO(0, index, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
@@ -114,7 +122,11 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_Driver_Column_getTypeName, 0, 0, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
+#if PHP_VERSION_ID >= 80100
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_ClickHouse_Driver_Column_getType, 0, 0, ClickHouse\\Driver\\Type, 0)
+#else
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_Driver_Column_getType, 0, 0, IS_LONG, 0)
+#endif
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_Driver_Column_size, 0, 0, IS_LONG, 0)
@@ -128,4 +140,3 @@ ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_Driver_Exception_ServerException_getClickHouseCode, 0, 0, IS_LONG, 0)
 ZEND_END_ARG_INFO()
-

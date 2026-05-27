@@ -6,15 +6,16 @@
 
 #include <memory>
 
-struct php_clickhouse_block {
+struct php_clickhouse_block
+{
     std::unique_ptr<clickhouse::Block> block;
     zend_object std;
 };
 
 static inline php_clickhouse_block *php_clickhouse_block_from_obj(zend_object *obj)
 {
-    return reinterpret_cast<php_clickhouse_block *>(
-        reinterpret_cast<char *>(obj) - XtOffsetOf(php_clickhouse_block, std));
+    return reinterpret_cast<php_clickhouse_block *>(reinterpret_cast<char *>(obj) -
+                                                    XtOffsetOf(php_clickhouse_block, std));
 }
 
 static inline php_clickhouse_block *php_clickhouse_block_from_zval(zval *zv)

@@ -9,8 +9,8 @@ static zend_object_handlers clickhouse_block_handlers;
 
 static zend_object *php_clickhouse_block_create(zend_class_entry *ce)
 {
-    auto *intern = static_cast<php_clickhouse_block *>(
-        zend_object_alloc(sizeof(php_clickhouse_block), ce));
+    auto *intern =
+        static_cast<php_clickhouse_block *>(zend_object_alloc(sizeof(php_clickhouse_block), ce));
 
     new (&intern->block) std::unique_ptr<clickhouse::Block>();
 
@@ -42,8 +42,8 @@ ZEND_METHOD(ClickHouse_Driver_Block, appendColumn)
     zval *col_zv = nullptr;
 
     ZEND_PARSE_PARAMETERS_START(2, 2)
-        Z_PARAM_STR(name)
-        Z_PARAM_OBJECT_OF_CLASS(col_zv, clickhouse_ce_Column)
+    Z_PARAM_STR(name)
+    Z_PARAM_OBJECT_OF_CLASS(col_zv, clickhouse_ce_Column)
     ZEND_PARSE_PARAMETERS_END();
 
     auto *intern = Z_CLICKHOUSE_BLOCK_P(ZEND_THIS);
@@ -59,9 +59,7 @@ ZEND_METHOD(ClickHouse_Driver_Block, appendColumn)
     }
 
     CLICKHOUSE_TRY
-        intern->block->AppendColumn(
-            std::string(ZSTR_VAL(name), ZSTR_LEN(name)),
-            col_intern->column);
+    intern->block->AppendColumn(std::string(ZSTR_VAL(name), ZSTR_LEN(name)), col_intern->column);
     CLICKHOUSE_CATCH
 }
 
@@ -92,11 +90,12 @@ ZEND_METHOD(ClickHouse_Driver_Block, getColumn)
     zend_long index = 0;
 
     ZEND_PARSE_PARAMETERS_START(1, 1)
-        Z_PARAM_LONG(index)
+    Z_PARAM_LONG(index)
     ZEND_PARSE_PARAMETERS_END();
 
     auto *intern = Z_CLICKHOUSE_BLOCK_P(ZEND_THIS);
-    if (!intern->block || index < 0 || static_cast<size_t>(index) >= intern->block->GetColumnCount()) {
+    if (!intern->block || index < 0 ||
+        static_cast<size_t>(index) >= intern->block->GetColumnCount()) {
         zend_throw_exception(clickhouse_ce_ValidationException, "Column index out of range", 0);
         return;
     }
@@ -110,11 +109,12 @@ ZEND_METHOD(ClickHouse_Driver_Block, getColumnName)
     zend_long index = 0;
 
     ZEND_PARSE_PARAMETERS_START(1, 1)
-        Z_PARAM_LONG(index)
+    Z_PARAM_LONG(index)
     ZEND_PARSE_PARAMETERS_END();
 
     auto *intern = Z_CLICKHOUSE_BLOCK_P(ZEND_THIS);
-    if (!intern->block || index < 0 || static_cast<size_t>(index) >= intern->block->GetColumnCount()) {
+    if (!intern->block || index < 0 ||
+        static_cast<size_t>(index) >= intern->block->GetColumnCount()) {
         zend_throw_exception(clickhouse_ce_ValidationException, "Column index out of range", 0);
         return;
     }
@@ -128,26 +128,33 @@ ZEND_METHOD(ClickHouse_Driver_Block, getColumnType)
     zend_long index = 0;
 
     ZEND_PARSE_PARAMETERS_START(1, 1)
-        Z_PARAM_LONG(index)
+    Z_PARAM_LONG(index)
     ZEND_PARSE_PARAMETERS_END();
 
     auto *intern = Z_CLICKHOUSE_BLOCK_P(ZEND_THIS);
-    if (!intern->block || index < 0 || static_cast<size_t>(index) >= intern->block->GetColumnCount()) {
+    if (!intern->block || index < 0 ||
+        static_cast<size_t>(index) >= intern->block->GetColumnCount()) {
         zend_throw_exception(clickhouse_ce_ValidationException, "Column index out of range", 0);
         return;
     }
 
     auto col = (*intern->block)[static_cast<size_t>(index)];
     zend_long code = static_cast<zend_long>(col->Type()->GetCode());
+#if PHP_VERSION_ID < 80100
+    RETURN_LONG(code);
+#else
     zend_object *enum_obj = nullptr;
 #if PHP_VERSION_ID >= 80300
-    if (zend_enum_get_case_by_value(&enum_obj, clickhouse_ce_Type, code, nullptr, false) == SUCCESS && enum_obj) {
+    if (zend_enum_get_case_by_value(&enum_obj, clickhouse_ce_Type, code, nullptr, false) ==
+            SUCCESS &&
+        enum_obj) {
 #else
     if (php_clickhouse_enum_get_case(&enum_obj, clickhouse_ce_Type, code) == SUCCESS && enum_obj) {
 #endif
         RETURN_OBJ_COPY(enum_obj);
     }
     RETURN_NULL();
+#endif
 }
 
 ZEND_METHOD(ClickHouse_Driver_Block, getColumnTypeName)
@@ -155,11 +162,12 @@ ZEND_METHOD(ClickHouse_Driver_Block, getColumnTypeName)
     zend_long index = 0;
 
     ZEND_PARSE_PARAMETERS_START(1, 1)
-        Z_PARAM_LONG(index)
+    Z_PARAM_LONG(index)
     ZEND_PARSE_PARAMETERS_END();
 
     auto *intern = Z_CLICKHOUSE_BLOCK_P(ZEND_THIS);
-    if (!intern->block || index < 0 || static_cast<size_t>(index) >= intern->block->GetColumnCount()) {
+    if (!intern->block || index < 0 ||
+        static_cast<size_t>(index) >= intern->block->GetColumnCount()) {
         zend_throw_exception(clickhouse_ce_ValidationException, "Column index out of range", 0);
         return;
     }
@@ -191,10 +199,8 @@ ZEND_METHOD(ClickHouse_Driver_Block, toArray)
         for (size_t c = 0; c < cols; ++c) {
             zval val;
             php_clickhouse_column_to_zval((*intern->block)[c], r, &val);
-            add_assoc_zval_ex(&row,
-                intern->block->GetColumnName(c).c_str(),
-                intern->block->GetColumnName(c).size(),
-                &val);
+            add_assoc_zval_ex(&row, intern->block->GetColumnName(c).c_str(),
+                              intern->block->GetColumnName(c).size(), &val);
         }
 
         add_next_index_zval(return_value, &row);
@@ -209,31 +215,38 @@ void php_clickhouse_create_block_from_cpp(zval *return_value, const clickhouse::
     /* Copy the block — shares column refs via shared_ptr */
     intern->block = std::make_unique<clickhouse::Block>();
     for (size_t i = 0; i < cpp_block.GetColumnCount(); ++i) {
-        intern->block->AppendColumn(
-            cpp_block.GetColumnName(i),
-            cpp_block[i]);
+        intern->block->AppendColumn(cpp_block.GetColumnName(i), cpp_block[i]);
     }
 }
 
 static const zend_function_entry class_ClickHouse_Driver_Block_methods[] = {
-    ZEND_ME(ClickHouse_Driver_Block, __construct, arginfo_class_ClickHouse_Driver_Block___construct, ZEND_ACC_PUBLIC)
-    ZEND_ME(ClickHouse_Driver_Block, appendColumn, arginfo_class_ClickHouse_Driver_Block_appendColumn, ZEND_ACC_PUBLIC)
-    ZEND_ME(ClickHouse_Driver_Block, getColumnCount, arginfo_class_ClickHouse_Driver_Block_getColumnCount, ZEND_ACC_PUBLIC)
-    ZEND_ME(ClickHouse_Driver_Block, getRowCount, arginfo_class_ClickHouse_Driver_Block_getRowCount, ZEND_ACC_PUBLIC)
-    ZEND_ME(ClickHouse_Driver_Block, getColumn, arginfo_class_ClickHouse_Driver_Block_getColumn, ZEND_ACC_PUBLIC)
-    ZEND_ME(ClickHouse_Driver_Block, getColumnName, arginfo_class_ClickHouse_Driver_Block_getColumnName, ZEND_ACC_PUBLIC)
-    ZEND_ME(ClickHouse_Driver_Block, getColumnType, arginfo_class_ClickHouse_Driver_Block_getColumnType, ZEND_ACC_PUBLIC)
-    ZEND_ME(ClickHouse_Driver_Block, getColumnTypeName, arginfo_class_ClickHouse_Driver_Block_getColumnTypeName, ZEND_ACC_PUBLIC)
-    ZEND_ME(ClickHouse_Driver_Block, toArray, arginfo_class_ClickHouse_Driver_Block_toArray, ZEND_ACC_PUBLIC)
-    ZEND_FE_END
-};
+    ZEND_ME(ClickHouse_Driver_Block, __construct, arginfo_class_ClickHouse_Driver_Block___construct,
+            ZEND_ACC_PUBLIC) ZEND_ME(ClickHouse_Driver_Block, appendColumn,
+                                     arginfo_class_ClickHouse_Driver_Block_appendColumn,
+                                     ZEND_ACC_PUBLIC)
+        ZEND_ME(ClickHouse_Driver_Block, getColumnCount,
+                arginfo_class_ClickHouse_Driver_Block_getColumnCount, ZEND_ACC_PUBLIC)
+            ZEND_ME(ClickHouse_Driver_Block, getRowCount,
+                    arginfo_class_ClickHouse_Driver_Block_getRowCount,
+                    ZEND_ACC_PUBLIC) ZEND_ME(ClickHouse_Driver_Block, getColumn,
+                                             arginfo_class_ClickHouse_Driver_Block_getColumn,
+                                             ZEND_ACC_PUBLIC)
+                ZEND_ME(ClickHouse_Driver_Block, getColumnName,
+                        arginfo_class_ClickHouse_Driver_Block_getColumnName, ZEND_ACC_PUBLIC)
+                    ZEND_ME(ClickHouse_Driver_Block, getColumnType,
+                            arginfo_class_ClickHouse_Driver_Block_getColumnType, ZEND_ACC_PUBLIC)
+                        ZEND_ME(ClickHouse_Driver_Block, getColumnTypeName,
+                                arginfo_class_ClickHouse_Driver_Block_getColumnTypeName,
+                                ZEND_ACC_PUBLIC)
+                            ZEND_ME(ClickHouse_Driver_Block, toArray,
+                                    arginfo_class_ClickHouse_Driver_Block_toArray, ZEND_ACC_PUBLIC)
+                                ZEND_FE_END};
 
 void php_clickhouse_register_block(int module_number)
 {
     zend_class_entry ce;
 
-    INIT_NS_CLASS_ENTRY(ce, "ClickHouse\\Driver", "Block",
-        class_ClickHouse_Driver_Block_methods);
+    INIT_NS_CLASS_ENTRY(ce, "ClickHouse\\Driver", "Block", class_ClickHouse_Driver_Block_methods);
     clickhouse_ce_Block = zend_register_internal_class(&ce);
     clickhouse_ce_Block->ce_flags |= ZEND_ACC_FINAL;
     clickhouse_ce_Block->create_object = php_clickhouse_block_create;
@@ -241,7 +254,8 @@ void php_clickhouse_register_block(int module_number)
     clickhouse_ce_Block->default_object_handlers = &clickhouse_block_handlers;
 #endif
 
-    memcpy(&clickhouse_block_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
+    memcpy(&clickhouse_block_handlers, zend_get_std_object_handlers(),
+           sizeof(zend_object_handlers));
     clickhouse_block_handlers.offset = XtOffsetOf(php_clickhouse_block, std);
     clickhouse_block_handlers.free_obj = php_clickhouse_block_free;
     clickhouse_block_handlers.clone_obj = nullptr;

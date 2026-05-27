@@ -21,7 +21,7 @@ echo "val[0]: " . $v0 . "\n";
 $v2 = $col->at(2);
 echo "val[2] raw length: " . strlen($v2) . "\n";
 // 'ab' padded to 5 bytes with nulls
-echo "val[2] starts with 'ab': " . (str_starts_with($v2, 'ab') ? 'yes' : 'no') . "\n";
+echo "val[2] starts with 'ab': " . (substr($v2, 0, 2) === 'ab' ? 'yes' : 'no') . "\n";
 
 // toArray
 $arr = $col->toArray();

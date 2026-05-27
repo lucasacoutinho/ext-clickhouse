@@ -1,0 +1,15 @@
+---
+Checks: >
+  -*,
+  clang-analyzer-*,
+  bugprone-*,
+  performance-*,
+  portability-*,
+  readability-redundant-*,
+  modernize-use-nullptr
+WarningsAsErrors: ''
+HeaderFilterRegex: '^(php_clickhouse|contrib_|src/)'
+SystemHeaders: false
+CheckOptions:
+  - key: bugprone-easily-swappable-parameters.MinimumLength
+    value: '4'

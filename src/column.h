@@ -4,15 +4,16 @@
 #include "php_clickhouse.h"
 #include "clickhouse/columns/column.h"
 
-struct php_clickhouse_column {
+struct php_clickhouse_column
+{
     clickhouse::ColumnRef column; /* shared_ptr — shared with Block */
     zend_object std;
 };
 
 static inline php_clickhouse_column *php_clickhouse_column_from_obj(zend_object *obj)
 {
-    return reinterpret_cast<php_clickhouse_column *>(
-        reinterpret_cast<char *>(obj) - XtOffsetOf(php_clickhouse_column, std));
+    return reinterpret_cast<php_clickhouse_column *>(reinterpret_cast<char *>(obj) -
+                                                     XtOffsetOf(php_clickhouse_column, std));
 }
 
 static inline php_clickhouse_column *php_clickhouse_column_from_zval(zval *zv)

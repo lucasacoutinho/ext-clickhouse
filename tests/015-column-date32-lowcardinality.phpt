@@ -39,9 +39,6 @@ var_dump($col->at(0));
 var_dump($col->at(2));
 
 // --- LowCardinality(Nullable(String)) ---
-// Note: lowcardinality_to_zval's default path returns empty string for null items
-// because ItemView returns an empty string_view for null/void entries.
-// This is a known limitation — null detection in LC(Nullable) requires checking ItemView type.
 $col = Column::create('LowCardinality(Nullable(String))', ['hello', null, 'hello', null]);
 echo "\nLC(Nullable(String)) size: " . $col->size() . "\n";
 var_dump($col->at(0));
@@ -74,8 +71,8 @@ string(3) "abc"
 
 LC(Nullable(String)) size: 4
 string(5) "hello"
-string(0) ""
+NULL
 string(5) "hello"
-string(0) ""
+NULL
 
 Done

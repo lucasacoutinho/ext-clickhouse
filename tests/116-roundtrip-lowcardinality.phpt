@@ -32,9 +32,6 @@ $rows = $client->select('SELECT * FROM _test_ext_lc');
 
 echo "Row count: " . count($rows) . "\n";
 
-// Note: LowCardinality(Nullable(String)) null values currently come back as empty strings
-// because lowcardinality_to_zval doesn't distinguish null from empty in the ItemView.
-// This tests current behavior; a future fix should return proper NULL.
 foreach ($rows as $i => $row) {
     $lcns_display = ($row['lcns'] === null) ? 'NULL' : (($row['lcns'] === '') ? 'EMPTY' : $row['lcns']);
     echo "Row $i: lcs={$row['lcs']}, lcns={$lcns_display}\n";
@@ -51,8 +48,8 @@ try { $client->execute('DROP TABLE IF EXISTS _test_ext_lc'); } catch (\Throwable
 --EXPECT--
 Row count: 5
 Row 0: lcs=hello, lcns=hello
-Row 1: lcs=world, lcns=EMPTY
+Row 1: lcs=world, lcns=NULL
 Row 2: lcs=hello, lcns=hello
-Row 3: lcs=hello, lcns=EMPTY
+Row 3: lcs=hello, lcns=NULL
 Row 4: lcs=world, lcns=world
 Done

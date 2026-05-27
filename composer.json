@@ -1,0 +1,17 @@
+{
+  "name": "lucasacoutinho/ext-clickhouse",
+  "description": "Native TCP ClickHouse client extension for PHP.",
+  "type": "php-ext",
+  "license": "MIT",
+  "require": {
+    "php": ">=7.4 <8.6"
+  },
+  "php-ext": {
+    "extension-name": "clickhouse",
+    "priority": 20,
+    "support-zts": true,
+    "support-nts": true,
+    "download-url-method": ["pre-packaged-source"],
+    "os-families-exclude": ["windows"]
+  }
+}

@@ -1,6 +1,5 @@
-ARG PHP_VERSION=8.4
+ARG PHP_VERSION=8.5
 
-# --- Stage 1: Build ---
 FROM php:${PHP_VERSION}-cli AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -14,7 +13,6 @@ RUN phpize \
     && ./configure --enable-clickhouse \
     && make -j$(nproc)
 
-# --- Stage 2: Runtime ---
 FROM php:${PHP_VERSION}-cli
 
 COPY --from=builder /ext/modules/clickhouse.so /tmp/clickhouse.so

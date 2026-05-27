@@ -26,8 +26,7 @@ static PHP_MINFO_FUNCTION(clickhouse)
 {
     auto ver = clickhouse::Client::GetVersion();
     char cpp_version[64];
-    snprintf(cpp_version, sizeof(cpp_version), "%d.%d.%d",
-        ver.major, ver.minor, ver.patch);
+    snprintf(cpp_version, sizeof(cpp_version), "%d.%d.%d", ver.major, ver.minor, ver.patch);
 
     php_info_print_table_start();
     php_info_print_table_header(2, "ClickHouse Native Driver", "enabled");
@@ -40,22 +39,18 @@ static PHP_MINFO_FUNCTION(clickhouse)
 
 extern "C" {
 
-static const zend_function_entry clickhouse_functions[] = {
-    PHP_FE_END
-};
+static const zend_function_entry clickhouse_functions[] = {PHP_FE_END};
 
-zend_module_entry clickhouse_module_entry = {
-    STANDARD_MODULE_HEADER,
-    PHP_CLICKHOUSE_EXTNAME,
-    clickhouse_functions,
-    PHP_MINIT(clickhouse),
-    PHP_MSHUTDOWN(clickhouse),
-    NULL, /* RINIT */
-    NULL, /* RSHUTDOWN */
-    PHP_MINFO(clickhouse),
-    PHP_CLICKHOUSE_VERSION,
-    STANDARD_MODULE_PROPERTIES
-};
+zend_module_entry clickhouse_module_entry = {STANDARD_MODULE_HEADER,
+                                             PHP_CLICKHOUSE_EXTNAME,
+                                             clickhouse_functions,
+                                             PHP_MINIT(clickhouse),
+                                             PHP_MSHUTDOWN(clickhouse),
+                                             NULL, /* RINIT */
+                                             NULL, /* RSHUTDOWN */
+                                             PHP_MINFO(clickhouse),
+                                             PHP_CLICKHOUSE_VERSION,
+                                             STANDARD_MODULE_PROPERTIES};
 
 #ifdef COMPILE_DL_CLICKHOUSE
 ZEND_GET_MODULE(clickhouse)

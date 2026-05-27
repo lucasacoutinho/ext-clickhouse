@@ -12,11 +12,11 @@
 
 function clickhouse_test_options(): ClickHouse\Driver\ClientOptions {
     return new ClickHouse\Driver\ClientOptions(
-        host: getenv('CLICKHOUSE_HOST') ?: 'localhost',
-        port: (int)(getenv('CLICKHOUSE_PORT') ?: 9000),
-        database: getenv('CLICKHOUSE_DB') ?: 'default',
-        user: getenv('CLICKHOUSE_USER') ?: 'default',
-        password: getenv('CLICKHOUSE_PASS') ?: '',
+        getenv('CLICKHOUSE_HOST') ?: 'localhost',
+        (int)(getenv('CLICKHOUSE_PORT') ?: 9000),
+        getenv('CLICKHOUSE_DB') ?: 'default',
+        getenv('CLICKHOUSE_USER') ?: 'default',
+        getenv('CLICKHOUSE_PASS') ?: ''
     );
 }
 

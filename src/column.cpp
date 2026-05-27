@@ -10,8 +10,8 @@ static zend_object_handlers clickhouse_column_handlers;
 
 static zend_object *php_clickhouse_column_create(zend_class_entry *ce)
 {
-    auto *intern = static_cast<php_clickhouse_column *>(
-        zend_object_alloc(sizeof(php_clickhouse_column), ce));
+    auto *intern =
+        static_cast<php_clickhouse_column *>(zend_object_alloc(sizeof(php_clickhouse_column), ce));
 
     new (&intern->column) clickhouse::ColumnRef();
 
@@ -35,29 +35,32 @@ ZEND_METHOD(ClickHouse_Driver_Column, create)
     zval *values = nullptr;
 
     ZEND_PARSE_PARAMETERS_START(2, 2)
-        Z_PARAM_STR(type_name)
-        Z_PARAM_ARRAY(values)
+    Z_PARAM_STR(type_name)
+    Z_PARAM_ARRAY(values)
     ZEND_PARSE_PARAMETERS_END();
 
     CLICKHOUSE_TRY
-        std::string cpp_type_name(ZSTR_VAL(type_name), ZSTR_LEN(type_name));
-        clickhouse::ColumnRef col = clickhouse::CreateColumnByType(cpp_type_name);
+    std::string cpp_type_name(ZSTR_VAL(type_name), ZSTR_LEN(type_name));
+    clickhouse::ColumnRef col = clickhouse::CreateColumnByType(cpp_type_name);
 
-        if (!col) {
-            zend_throw_exception_ex(clickhouse_ce_ValidationException, 0,
-                "Unknown ClickHouse type: %s", ZSTR_VAL(type_name));
+    if (!col) {
+        zend_throw_exception_ex(clickhouse_ce_ValidationException, 0, "Unknown ClickHouse type: %s",
+                                ZSTR_VAL(type_name));
+        return;
+    }
+
+    /* Populate from PHP array */
+    HashTable *ht = Z_ARRVAL_P(values);
+    zval *entry;
+    ZEND_HASH_FOREACH_VAL(ht, entry)
+    {
+        php_clickhouse_zval_to_column(col, entry);
+        if (EG(exception))
             return;
-        }
+    }
+    ZEND_HASH_FOREACH_END();
 
-        /* Populate from PHP array */
-        HashTable *ht = Z_ARRVAL_P(values);
-        zval *entry;
-        ZEND_HASH_FOREACH_VAL(ht, entry) {
-            php_clickhouse_zval_to_column(col, entry);
-            if (EG(exception)) return;
-        } ZEND_HASH_FOREACH_END();
-
-        php_clickhouse_create_column_from_ref(return_value, col);
+    php_clickhouse_create_column_from_ref(return_value, col);
     CLICKHOUSE_CATCH_RETURN
 }
 
@@ -85,15 +88,21 @@ ZEND_METHOD(ClickHouse_Driver_Column, getType)
 
     zend_long code = static_cast<zend_long>(intern->column->Type()->GetCode());
 
+#if PHP_VERSION_ID < 80100
+    RETURN_LONG(code);
+#else
     zend_object *enum_obj = nullptr;
 #if PHP_VERSION_ID >= 80300
-    if (zend_enum_get_case_by_value(&enum_obj, clickhouse_ce_Type, code, nullptr, false) == SUCCESS && enum_obj) {
+    if (zend_enum_get_case_by_value(&enum_obj, clickhouse_ce_Type, code, nullptr, false) ==
+            SUCCESS &&
+        enum_obj) {
 #else
     if (php_clickhouse_enum_get_case(&enum_obj, clickhouse_ce_Type, code) == SUCCESS && enum_obj) {
 #endif
         RETURN_OBJ_COPY(enum_obj);
     }
     RETURN_NULL();
+#endif
 }
 
 ZEND_METHOD(ClickHouse_Driver_Column, size)
@@ -112,7 +121,7 @@ ZEND_METHOD(ClickHouse_Driver_Column, at)
     zend_long index = 0;
 
     ZEND_PARSE_PARAMETERS_START(1, 1)
-        Z_PARAM_LONG(index)
+    Z_PARAM_LONG(index)
     ZEND_PARSE_PARAMETERS_END();
 
     auto *intern = Z_CLICKHOUSE_COLUMN_P(ZEND_THIS);
@@ -152,21 +161,24 @@ void php_clickhouse_create_column_from_ref(zval *return_value, clickhouse::Colum
 }
 
 static const zend_function_entry class_ClickHouse_Driver_Column_methods[] = {
-    ZEND_ME(ClickHouse_Driver_Column, create, arginfo_class_ClickHouse_Driver_Column_create, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
-    ZEND_ME(ClickHouse_Driver_Column, getTypeName, arginfo_class_ClickHouse_Driver_Column_getTypeName, ZEND_ACC_PUBLIC)
-    ZEND_ME(ClickHouse_Driver_Column, getType, arginfo_class_ClickHouse_Driver_Column_getType, ZEND_ACC_PUBLIC)
-    ZEND_ME(ClickHouse_Driver_Column, size, arginfo_class_ClickHouse_Driver_Column_size, ZEND_ACC_PUBLIC)
-    ZEND_ME(ClickHouse_Driver_Column, at, arginfo_class_ClickHouse_Driver_Column_at, ZEND_ACC_PUBLIC)
-    ZEND_ME(ClickHouse_Driver_Column, toArray, arginfo_class_ClickHouse_Driver_Column_toArray, ZEND_ACC_PUBLIC)
-    ZEND_FE_END
-};
+    ZEND_ME(ClickHouse_Driver_Column, create, arginfo_class_ClickHouse_Driver_Column_create,
+            ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
+        ZEND_ME(ClickHouse_Driver_Column, getTypeName,
+                arginfo_class_ClickHouse_Driver_Column_getTypeName, ZEND_ACC_PUBLIC)
+            ZEND_ME(ClickHouse_Driver_Column, getType,
+                    arginfo_class_ClickHouse_Driver_Column_getType, ZEND_ACC_PUBLIC)
+                ZEND_ME(ClickHouse_Driver_Column, size, arginfo_class_ClickHouse_Driver_Column_size,
+                        ZEND_ACC_PUBLIC)
+                    ZEND_ME(ClickHouse_Driver_Column, at, arginfo_class_ClickHouse_Driver_Column_at,
+                            ZEND_ACC_PUBLIC) ZEND_ME(ClickHouse_Driver_Column, toArray,
+                                                     arginfo_class_ClickHouse_Driver_Column_toArray,
+                                                     ZEND_ACC_PUBLIC) ZEND_FE_END};
 
 void php_clickhouse_register_column(int module_number)
 {
     zend_class_entry ce;
 
-    INIT_NS_CLASS_ENTRY(ce, "ClickHouse\\Driver", "Column",
-        class_ClickHouse_Driver_Column_methods);
+    INIT_NS_CLASS_ENTRY(ce, "ClickHouse\\Driver", "Column", class_ClickHouse_Driver_Column_methods);
     clickhouse_ce_Column = zend_register_internal_class(&ce);
     clickhouse_ce_Column->ce_flags |= ZEND_ACC_FINAL;
     clickhouse_ce_Column->create_object = php_clickhouse_column_create;
@@ -174,7 +186,8 @@ void php_clickhouse_register_column(int module_number)
     clickhouse_ce_Column->default_object_handlers = &clickhouse_column_handlers;
 #endif
 
-    memcpy(&clickhouse_column_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
+    memcpy(&clickhouse_column_handlers, zend_get_std_object_handlers(),
+           sizeof(zend_object_handlers));
     clickhouse_column_handlers.offset = XtOffsetOf(php_clickhouse_column, std);
     clickhouse_column_handlers.free_obj = php_clickhouse_column_free;
     clickhouse_column_handlers.clone_obj = nullptr;

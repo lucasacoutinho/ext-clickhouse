@@ -4,26 +4,28 @@ CompressionMethod and Type enum values
 clickhouse
 --FILE--
 <?php
+require __DIR__ . '/clickhouse_compat.inc';
+
 use ClickHouse\Driver\CompressionMethod;
 use ClickHouse\Driver\Type;
 
 // CompressionMethod
-var_dump(CompressionMethod::None->value);
-var_dump(CompressionMethod::LZ4->value);
-var_dump(CompressionMethod::ZSTD->value);
+var_dump(clickhouse_case_value(CompressionMethod::None));
+var_dump(clickhouse_case_value(CompressionMethod::LZ4));
+var_dump(clickhouse_case_value(CompressionMethod::ZSTD));
 
 // Type enum — spot check key values
-var_dump(Type::Int8->value);
-var_dump(Type::UInt64->value);
-var_dump(Type::String->value);
-var_dump(Type::Nullable->value);
-var_dump(Type::Array->value);
-var_dump(Type::Map->value);
-var_dump(Type::DateTime64->value);
+var_dump(clickhouse_case_value(Type::Int8));
+var_dump(clickhouse_case_value(Type::UInt64));
+var_dump(clickhouse_case_value(Type::String));
+var_dump(clickhouse_case_value(Type::Nullable));
+var_dump(clickhouse_case_value(Type::Array));
+var_dump(clickhouse_case_value(Type::Map));
+var_dump(clickhouse_case_value(Type::DateTime64));
 
-// Backed enum from value
-var_dump(Type::from(11) === Type::String);
-var_dump(CompressionMethod::from(1) === CompressionMethod::LZ4);
+// Backed enum from value on PHP 8.1+, compatible constant fallback on older PHP.
+var_dump(clickhouse_enum_like_from(Type::class, 11) === Type::String);
+var_dump(clickhouse_enum_like_from(CompressionMethod::class, 1) === CompressionMethod::LZ4);
 ?>
 --EXPECT--
 int(-1)

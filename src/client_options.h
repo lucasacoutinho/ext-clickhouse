@@ -6,12 +6,14 @@
 
 #include <memory>
 
-struct php_clickhouse_client_options {
+struct php_clickhouse_client_options
+{
     std::unique_ptr<clickhouse::ClientOptions> options;
     zend_object std;
 };
 
-static inline php_clickhouse_client_options *php_clickhouse_client_options_from_obj(zend_object *obj)
+static inline php_clickhouse_client_options *
+php_clickhouse_client_options_from_obj(zend_object *obj)
 {
     return reinterpret_cast<php_clickhouse_client_options *>(
         reinterpret_cast<char *>(obj) - XtOffsetOf(php_clickhouse_client_options, std));
