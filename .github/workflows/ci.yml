@@ -157,6 +157,16 @@ jobs:
           lcov --extract coverage.raw.info "$(pwd)/*.cpp" "$(pwd)/src/*" --output-file coverage.info
           genhtml coverage.info --output-directory coverage-html
 
+      - name: Publish coverage summary
+        run: |
+          {
+            echo "### C/C++ coverage"
+            echo
+            echo '```text'
+            lcov --summary coverage.info 2>&1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
