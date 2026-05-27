@@ -20,6 +20,7 @@ jobs:
         with:
           php-version: '8.5'
           tools: phpize
+          coverage: none
 
       - name: Install C/C++ tools
         run: |
@@ -53,7 +54,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php-version: ['7.4', '8.5']
+        php-version: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
 
     steps:
       - name: Checkout
@@ -66,24 +67,103 @@ jobs:
         with:
           php-version: ${{ matrix.php-version }}
           tools: phpize
+          coverage: none
 
-      - name: Build and test with ASAN/UBSAN
+      - name: Build and test with sanitizers
         run: |
           phpize
-          sanitizer_flags="-fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g"
+          if [ "${{ matrix.php-version }}" = "7.4" ]; then
+            sanitizer_flags="-fsanitize=undefined -fno-omit-frame-pointer -O1 -g"
+            sanitizer_ldflags="-fsanitize=undefined"
+          else
+            sanitizer_flags="-fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g"
+            sanitizer_ldflags="-fsanitize=address,undefined"
+          fi
           CFLAGS="$sanitizer_flags" \
           CXXFLAGS="$sanitizer_flags" \
-          LDFLAGS="-fsanitize=address,undefined" \
+          LDFLAGS="$sanitizer_ldflags" \
             ./configure --enable-clickhouse
           make clean || true
           make -j"$(nproc)"
-          asan_lib="$(cc -print-file-name=libasan.so)"
-          USE_ZEND_ALLOC=0 \
-          LD_PRELOAD="$asan_lib" \
-          CLICKHOUSE_SANITIZER=1 \
-          ASAN_OPTIONS="detect_leaks=0:abort_on_error=1" \
-          UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1" \
-            php run-tests.php -d extension=modules/clickhouse.so --show-diff -q tests/0*.phpt
+          run_env=(
+            USE_ZEND_ALLOC=0
+            CLICKHOUSE_SANITIZER=1
+            UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
+            TEST_PHP_EXECUTABLE="$(command -v php)"
+          )
+          if [ "${{ matrix.php-version }}" != "7.4" ]; then
+            asan_lib="$(cc -print-file-name=libasan.so)"
+            run_env+=(
+              LD_PRELOAD="$asan_lib"
+              ASAN_OPTIONS="detect_leaks=0:abort_on_error=1"
+            )
+          fi
+          env "${run_env[@]}" timeout 180s php -n run-tests.php -n \
+            -d extension=modules/clickhouse.so --show-diff -q tests/0*.phpt
+
+  coverage:
+    runs-on: ubuntu-latest
+
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:24
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "clickhouse-client --query 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+          tools: phpize
+          coverage: none
+
+      - name: Install coverage tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends lcov
+
+      - name: Build extension with coverage
+        run: |
+          phpize
+          coverage_flags="--coverage -O0 -g"
+          CFLAGS="$coverage_flags" \
+          CXXFLAGS="$coverage_flags" \
+          LDFLAGS="--coverage" \
+            ./configure --enable-clickhouse
+          make -j"$(nproc)"
+
+      - name: Run tests
+        env:
+          CLICKHOUSE_HOST: 127.0.0.1
+          CLICKHOUSE_PORT: '9000'
+        run: |
+          TEST_PHP_EXECUTABLE="$(command -v php)" \
+            php -n run-tests.php -n -d extension=modules/clickhouse.so --show-diff -q tests/*.phpt
+
+      - name: Generate coverage report
+        run: |
+          lcov --capture --directory . --output-file coverage.raw.info
+          lcov --extract coverage.raw.info "$(pwd)/*.cpp" "$(pwd)/src/*" --output-file coverage.info
+          genhtml coverage.info --output-directory coverage-html
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ext-clickhouse-coverage
+          path: |
+            coverage.info
+            coverage-html/
 
   build-and-test:
     runs-on: ubuntu-latest
@@ -115,6 +195,7 @@ jobs:
         with:
           php-version: ${{ matrix.php-version }}
           tools: phpize
+          coverage: none
 
       - name: Build extension
         run: |
@@ -125,7 +206,7 @@ jobs:
       - name: Run unit tests
         run: |
           TEST_PHP_EXECUTABLE=$(which php) \
-            php run-tests.php -d extension=modules/clickhouse.so \
+            php -n run-tests.php -n -d extension=modules/clickhouse.so \
             --show-diff -q tests/0*.phpt
 
       - name: Run integration tests
@@ -134,5 +215,5 @@ jobs:
           CLICKHOUSE_PORT: '9000'
         run: |
           TEST_PHP_EXECUTABLE=$(which php) \
-            php run-tests.php -d extension=modules/clickhouse.so \
+            php -n run-tests.php -n -d extension=modules/clickhouse.so \
             --show-diff -q tests/1*.phpt
