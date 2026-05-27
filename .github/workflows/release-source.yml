@@ -15,13 +15,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          submodules: recursive
+          submodules: false
+
+      - name: Checkout clickhouse-cpp
+        run: |
+          git submodule sync --recursive
+          for attempt in 1 2 3; do
+            if git submodule update --init --force --depth=1 --recursive; then
+              exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+          git submodule update --init --force --depth=1 --recursive
 
       - name: Build PIE source package
         run: |
           version="${GITHUB_REF_NAME#v}"
           package_dir="clickhouse-$version"
-          git submodule update --init --recursive
           rm -rf dist
           mkdir -p "dist" "$RUNNER_TEMP/$package_dir"
           tar \
