@@ -16,7 +16,7 @@ $client = clickhouse_test_client();
 // Parameterized SELECT with {name:Type} syntax
 $rows = $client->select(
     "SELECT {val:UInt64} AS n, {name:String} AS s",
-    params: ['val' => '42', 'name' => 'hello']
+    ['val' => '42', 'name' => 'hello']
 );
 var_dump($rows[0]['n']);
 var_dump($rows[0]['s']);
@@ -24,7 +24,7 @@ var_dump($rows[0]['s']);
 // Parameterized with NULL
 $rows = $client->select(
     "SELECT {maybe:Nullable(String)} AS v",
-    params: ['maybe' => null]
+    ['maybe' => null]
 );
 var_dump($rows[0]['v']);
 

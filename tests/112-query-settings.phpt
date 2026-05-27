@@ -16,7 +16,8 @@ $client = clickhouse_test_client();
 // Verify settings parameter is accepted without error
 $rows = $client->select(
     'SELECT number FROM system.numbers LIMIT 10',
-    settings: ['max_block_size' => '5']
+    null,
+    ['max_block_size' => '5']
 );
 
 var_dump(count($rows) === 10);

@@ -72,7 +72,7 @@ jobs:
       - name: Build and test with sanitizers
         run: |
           phpize
-          if [ "${{ matrix.php-version }}" = "7.4" ]; then
+          if [ "${{ matrix.php-version }}" = "7.4" ] || [ "${{ matrix.php-version }}" = "8.0" ]; then
             sanitizer_flags="-fsanitize=undefined -fno-omit-frame-pointer -O1 -g"
             sanitizer_ldflags="-fsanitize=undefined"
           else
@@ -91,7 +91,7 @@ jobs:
             UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
             TEST_PHP_EXECUTABLE="$(command -v php)"
           )
-          if [ "${{ matrix.php-version }}" != "7.4" ]; then
+          if [ "${{ matrix.php-version }}" != "7.4" ] && [ "${{ matrix.php-version }}" != "8.0" ]; then
             asan_lib="$(cc -print-file-name=libasan.so)"
             run_env+=(
               LD_PRELOAD="$asan_lib"
