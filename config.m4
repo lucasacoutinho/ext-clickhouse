@@ -58,6 +58,7 @@ if test "$PHP_CLICKHOUSE" != "no"; then
     [$ext_shared],,
     [$CLICKHOUSE_COMMON_FLAGS $PHP_CLICKHOUSE_STDCXX],
     [cxx])
+  PHP_ADD_EXTENSION_DEP([clickhouse], [date])
 
   CLICKHOUSE_CPP_CXX_SOURCES=" \
     clickhouse-cpp/clickhouse/base/compressed.cpp \
@@ -81,6 +82,7 @@ if test "$PHP_CLICKHOUSE" != "no"; then
     clickhouse-cpp/clickhouse/columns/numeric.cpp \
     clickhouse-cpp/clickhouse/columns/map.cpp \
     clickhouse-cpp/clickhouse/columns/string.cpp \
+    clickhouse-cpp/clickhouse/columns/time.cpp \
     clickhouse-cpp/clickhouse/columns/tuple.cpp \
     clickhouse-cpp/clickhouse/columns/uuid.cpp \
     clickhouse-cpp/clickhouse/columns/itemview.cpp \

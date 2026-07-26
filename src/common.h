@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <new>
+#include <system_error>
 
 void php_clickhouse_throw_server_exception(const clickhouse::ServerException &e);
 void php_clickhouse_throw_exception(const char *message, zend_class_entry *ce);
@@ -32,6 +33,11 @@ void php_clickhouse_throw_exception(const char *message, zend_class_entry *ce);
     catch (const clickhouse::Error &e)                                                             \
     {                                                                                              \
         php_clickhouse_throw_exception(e.what(), clickhouse_ce_ClickHouseException);               \
+        return;                                                                                    \
+    }                                                                                              \
+    catch (const std::system_error &e)                                                             \
+    {                                                                                              \
+        php_clickhouse_throw_exception(e.what(), clickhouse_ce_ConnectionException);               \
         return;                                                                                    \
     }                                                                                              \
     catch (const std::exception &e)                                                                \
@@ -61,6 +67,11 @@ void php_clickhouse_throw_exception(const char *message, zend_class_entry *ce);
     catch (const clickhouse::Error &e)                                                             \
     {                                                                                              \
         php_clickhouse_throw_exception(e.what(), clickhouse_ce_ClickHouseException);               \
+        return;                                                                                    \
+    }                                                                                              \
+    catch (const std::system_error &e)                                                             \
+    {                                                                                              \
+        php_clickhouse_throw_exception(e.what(), clickhouse_ce_ConnectionException);               \
         return;                                                                                    \
     }                                                                                              \
     catch (const std::exception &e)                                                                \

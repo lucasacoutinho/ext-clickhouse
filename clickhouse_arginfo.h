@@ -1,5 +1,6 @@
-/* This is a generated-like file. Regenerate with:
- *   php php-src/build/gen_stub.php ext-clickhouse/clickhouse.stub.php
+/* This PHP 7.4-compatible arginfo is maintained from clickhouse.stub.php.
+ * Validate the canonical stub with:
+ *   php build/gen_stub.php -f clickhouse.stub.php
  */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_ClickHouse_Driver_ClientOptions___construct, 0, 0, 0)
@@ -22,6 +23,11 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_ClickHouse_Driver_ClientOptions___construct
     ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, recvTimeoutMs, IS_LONG, 0, "0")
     ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, sendTimeoutMs, IS_LONG, 0, "0")
     ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, ssl, IS_ARRAY, 1, "null")
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, endpoints, IS_ARRAY, 1, "null")
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, tcpKeepAliveIdleSeconds, IS_LONG, 0, "60")
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, tcpKeepAliveIntervalSeconds, IS_LONG, 0, "5")
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, tcpKeepAliveCount, IS_LONG, 0, "3")
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, maxCompressionChunkSize, IS_LONG, 0, "65535")
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_ClickHouse_Driver_Client___construct, 0, 0, 1)

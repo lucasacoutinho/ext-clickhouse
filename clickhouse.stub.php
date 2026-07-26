@@ -87,9 +87,9 @@ final class Client {
     public function select(string $query, ?array $params = null, ?array $settings = null, ?string $queryId = null): array {}
 
     /**
-     * @param callable(Block): bool|void $callback     Called per data block. Return false to cancel.
-     * @param callable(array): void|null $onProgress   Called with ['rows'=>int,'bytes'=>int,'total_rows'=>int,'written_rows'=>int,'written_bytes'=>int]
-     * @param callable(array): void|null $onProfile    Called with ['rows'=>int,'blocks'=>int,'bytes'=>int,'rows_before_limit'=>int,'applied_limit'=>bool]
+     * @param callable $callback Called per data block. Return false to cancel.
+     * @param callable|null $onProgress Called with progress counters.
+     * @param callable|null $onProfile Called with profile counters.
      */
     public function selectByBlock(
         string $query,
@@ -105,7 +105,7 @@ final class Client {
 
     /**
      * Execute SELECT with external temporary tables.
-     * @param array<array{name: string, data: Block}> $externalTables
+     * @param array $externalTables Entries contain a table name and Block data.
      */
     public function selectWithExternalData(string $query, array $externalTables, ?array $params = null, ?array $settings = null, ?string $queryId = null): array {}
 

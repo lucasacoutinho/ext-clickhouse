@@ -3,7 +3,7 @@ ARG PHP_VERSION=8.5
 FROM php:${PHP_VERSION}-cli AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    autoconf g++ make \
+    autoconf g++ make libssl-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /ext

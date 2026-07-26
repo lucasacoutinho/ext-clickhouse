@@ -1,6 +1,10 @@
 #include "src/column_write.h"
 #include "src/common.h"
 
+extern "C" {
+#include "ext/date/php_date.h"
+}
+
 #include "clickhouse/columns/array.h"
 #include "clickhouse/columns/date.h"
 #include "clickhouse/columns/decimal.h"
@@ -22,6 +26,7 @@
 
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <sstream>
@@ -113,19 +118,217 @@ static bool parse_int64_decimal(std::string_view input, int64_t min, int64_t max
     return true;
 }
 
-static bool parse_date_prefix(std::string_view input, struct tm &tm_buf)
+static bool is_valid_calendar_date(int year, int month, int day)
 {
-    if (input.size() < 10)
+    if (month < 1 || month > 12 || day < 1)
         return false;
 
-    if (input.size() > 10 && input[10] != 'T' &&
-        !std::isspace(static_cast<unsigned char>(input[10]))) {
+    static constexpr int days_per_month[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    int max_day = days_per_month[month - 1];
+    bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    if (month == 2 && leap)
+        max_day++;
+
+    return day <= max_day;
+}
+
+static bool parse_two_digits(std::string_view input, size_t offset, int &value)
+{
+    if (offset + 2 > input.size() || !is_decimal_digit(input[offset]) ||
+        !is_decimal_digit(input[offset + 1])) {
         return false;
     }
 
-    std::string date_part(input.substr(0, 10));
-    char *rest = strptime(date_part.c_str(), "%Y-%m-%d", &tm_buf);
-    return rest && *rest == '\0';
+    value = (input[offset] - '0') * 10 + (input[offset + 1] - '0');
+    return true;
+}
+
+static bool has_valid_iso_datetime_suffix(std::string_view input)
+{
+    if (input.size() == 10)
+        return true;
+
+    size_t pos = 10;
+    if (input[pos] == 'T') {
+        pos++;
+    } else if (std::isspace(static_cast<unsigned char>(input[pos]))) {
+        while (pos < input.size() && std::isspace(static_cast<unsigned char>(input[pos])))
+            pos++;
+    } else {
+        return false;
+    }
+
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    if (!parse_two_digits(input, pos, hour) || pos + 8 > input.size() || input[pos + 2] != ':' ||
+        !parse_two_digits(input, pos + 3, minute) || input[pos + 5] != ':' ||
+        !parse_two_digits(input, pos + 6, second) || hour > 23 || minute > 59 || second > 59) {
+        return false;
+    }
+    pos += 8;
+
+    if (pos < input.size() && input[pos] == '.') {
+        size_t fractional_start = ++pos;
+        while (pos < input.size() && is_decimal_digit(input[pos]))
+            pos++;
+        if (pos == fractional_start)
+            return false;
+    }
+
+    if (pos < input.size() && (input[pos] == 'Z' || input[pos] == 'z')) {
+        pos++;
+    } else if (pos < input.size() && (input[pos] == '+' || input[pos] == '-')) {
+        int offset_hour = 0;
+        int offset_minute = 0;
+        pos++;
+        if (!parse_two_digits(input, pos, offset_hour) || pos + 5 > input.size() ||
+            input[pos + 2] != ':' || !parse_two_digits(input, pos + 3, offset_minute) ||
+            offset_hour > 23 || offset_minute > 59) {
+            return false;
+        }
+        pos += 5;
+    }
+
+    while (pos < input.size() && std::isspace(static_cast<unsigned char>(input[pos])))
+        pos++;
+
+    return pos == input.size();
+}
+
+static bool parse_date_prefix(std::string_view input, struct tm &tm_buf)
+{
+    if (input.size() < 10 || input[4] != '-' || input[7] != '-')
+        return false;
+
+    for (size_t i :
+         {size_t{0}, size_t{1}, size_t{2}, size_t{3}, size_t{5}, size_t{6}, size_t{8}, size_t{9}}) {
+        if (!is_decimal_digit(input[i]))
+            return false;
+    }
+
+    int year =
+        (input[0] - '0') * 1000 + (input[1] - '0') * 100 + (input[2] - '0') * 10 + (input[3] - '0');
+    int month = (input[5] - '0') * 10 + (input[6] - '0');
+    int day = (input[8] - '0') * 10 + (input[9] - '0');
+    if (!is_valid_calendar_date(year, month, day) || !has_valid_iso_datetime_suffix(input))
+        return false;
+
+    tm_buf.tm_year = year - 1900;
+    tm_buf.tm_mon = month - 1;
+    tm_buf.tm_mday = day;
+
+    return true;
+}
+
+static bool is_valid_calendar_time(const struct tm &tm_buf)
+{
+    return is_valid_calendar_date(tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday) &&
+           tm_buf.tm_hour >= 0 && tm_buf.tm_hour <= 23 && tm_buf.tm_min >= 0 &&
+           tm_buf.tm_min <= 59 && tm_buf.tm_sec >= 0 && tm_buf.tm_sec <= 59;
+}
+
+static int64_t days_from_civil(int year, unsigned month, unsigned day)
+{
+    year -= month <= 2;
+    const int era = (year >= 0 ? year : year - 399) / 400;
+    const unsigned year_of_era = static_cast<unsigned>(year - era * 400);
+    const unsigned adjusted_month =
+        static_cast<unsigned>(static_cast<int>(month) + (month > 2 ? -3 : 9));
+    const unsigned day_of_year = (153 * adjusted_month + 2) / 5 + day - 1;
+    const unsigned day_of_era =
+        year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    return static_cast<int64_t>(era) * 146097 + static_cast<int64_t>(day_of_era) - 719468;
+}
+
+static int64_t timestamp_to_days(int64_t timestamp)
+{
+    int64_t days = timestamp / 86400;
+    if (timestamp < 0 && timestamp % 86400 != 0)
+        days--;
+    return days;
+}
+
+static bool datetime_in_timezone_to_epoch(const struct tm &tm_buf, const std::string &timezone,
+                                          int64_t &seconds)
+{
+    char local_time[32];
+    int len = snprintf(local_time, sizeof(local_time), "%04d-%02d-%02d %02d:%02d:%02d",
+                       tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday, tm_buf.tm_hour,
+                       tm_buf.tm_min, tm_buf.tm_sec);
+    if (len < 0 || static_cast<size_t>(len) >= sizeof(local_time))
+        return false;
+
+    std::string input(local_time, static_cast<size_t>(len));
+    input.push_back(' ');
+    input.append(timezone.empty() ? "UTC" : timezone);
+
+    zval datetime;
+    ZVAL_UNDEF(&datetime);
+    php_date_instantiate(php_date_get_immutable_ce(), &datetime);
+    php_date_obj *date_obj = Z_PHPDATE_P(&datetime);
+
+#if PHP_VERSION_ID < 80000
+    constexpr int date_init_flags = 0;
+#else
+    constexpr int date_init_flags = PHP_DATE_INIT_FORMAT;
+#endif
+    bool initialized =
+        php_date_initialize(date_obj, const_cast<char *>(input.c_str()), input.size(),
+                            const_cast<char *>("!Y-m-d H:i:s e"), nullptr, date_init_flags);
+    if (initialized && date_obj->time) {
+        seconds = static_cast<int64_t>(date_obj->time->sse);
+    }
+
+    zval_ptr_dtor(&datetime);
+    if (!initialized && EG(exception)) {
+        zend_clear_exception();
+    }
+    return initialized;
+}
+
+static bool decimal_value_fits_precision(std::string_view input, size_t precision, size_t scale)
+{
+    if (input.empty())
+        return false;
+
+    size_t pos = input[0] == '-' ? 1 : 0;
+    if (pos == input.size())
+        return false;
+
+    size_t dot = std::string_view::npos;
+    size_t digits = 0;
+    for (size_t i = pos; i < input.size(); ++i) {
+        if (input[i] == '.') {
+            if (dot != std::string_view::npos) {
+                return false;
+            }
+            dot = i;
+            continue;
+        }
+        if (!is_decimal_digit(input[i])) {
+            return false;
+        }
+        digits++;
+    }
+    if (digits == 0)
+        return false;
+
+    std::string scaled_digits;
+    if (dot == std::string_view::npos) {
+        scaled_digits.assign(input.substr(pos));
+    } else {
+        scaled_digits.assign(input.substr(pos, dot - pos));
+        size_t fractional_digits = input.size() - dot - 1;
+        size_t copied_fractional_digits = std::min(fractional_digits, scale);
+        scaled_digits.append(input.substr(dot + 1, copied_fractional_digits));
+        scaled_digits.append(scale - copied_fractional_digits, '0');
+    }
+
+    size_t first_nonzero = scaled_digits.find_first_not_of('0');
+    size_t significant_digits =
+        first_nonzero == std::string::npos ? 0 : scaled_digits.size() - first_nonzero;
+    return significant_digits <= precision;
 }
 
 template <typename T> static bool zval_to_integral(zval *value, T &out)
@@ -266,8 +469,13 @@ static void write_date(ColumnRef &col, zval *value)
         /* Parse 'YYYY-MM-DD' */
         struct tm tm_buf = {};
         if (parse_date_prefix(std::string_view(Z_STRVAL_P(value), Z_STRLEN_P(value)), tm_buf)) {
-            typed->Append(timegm(&tm_buf));
-            return;
+            int64_t days =
+                days_from_civil(tm_buf.tm_year + 1900, static_cast<unsigned>(tm_buf.tm_mon + 1),
+                                static_cast<unsigned>(tm_buf.tm_mday));
+            if (days >= 0 && days <= std::numeric_limits<uint16_t>::max()) {
+                typed->AppendRaw(static_cast<uint16_t>(days));
+                return;
+            }
         }
         zend_throw_exception_ex(clickhouse_ce_ValidationException, 0, "Invalid Date value: %s",
                                 Z_STRVAL_P(value));
@@ -280,7 +488,18 @@ static void write_date(ColumnRef &col, zval *value)
                              "Date column expects YYYY-MM-DD string or integer timestamp", 0);
         return;
     }
-    typed->Append(static_cast<std::time_t>(timestamp));
+    if (timestamp < 0) {
+        zend_throw_exception(clickhouse_ce_ValidationException, "Date timestamp is out of range",
+                             0);
+        return;
+    }
+    uint64_t days = static_cast<uint64_t>(timestamp) / 86400;
+    if (days > std::numeric_limits<uint16_t>::max()) {
+        zend_throw_exception(clickhouse_ce_ValidationException, "Date timestamp is out of range",
+                             0);
+        return;
+    }
+    typed->AppendRaw(static_cast<uint16_t>(days));
 }
 
 static void write_date32(ColumnRef &col, zval *value)
@@ -291,11 +510,19 @@ static void write_date32(ColumnRef &col, zval *value)
         return;
     }
 
+    const int64_t min_days = days_from_civil(1900, 1, 1);
+    const int64_t max_days = days_from_civil(2299, 12, 31);
+
     if (Z_TYPE_P(value) == IS_STRING) {
         struct tm tm_buf = {};
         if (parse_date_prefix(std::string_view(Z_STRVAL_P(value), Z_STRLEN_P(value)), tm_buf)) {
-            typed->Append(timegm(&tm_buf));
-            return;
+            int64_t days =
+                days_from_civil(tm_buf.tm_year + 1900, static_cast<unsigned>(tm_buf.tm_mon + 1),
+                                static_cast<unsigned>(tm_buf.tm_mday));
+            if (days >= min_days && days <= max_days) {
+                typed->AppendRaw(static_cast<int32_t>(days));
+                return;
+            }
         }
         zend_throw_exception_ex(clickhouse_ce_ValidationException, 0, "Invalid Date32 value: %s",
                                 Z_STRVAL_P(value));
@@ -308,7 +535,14 @@ static void write_date32(ColumnRef &col, zval *value)
                              "Date32 column expects YYYY-MM-DD string or integer timestamp", 0);
         return;
     }
-    typed->Append(static_cast<std::time_t>(timestamp));
+
+    int64_t days = timestamp_to_days(static_cast<int64_t>(timestamp));
+    if (days < min_days || days > max_days) {
+        zend_throw_exception(clickhouse_ce_ValidationException, "Date32 timestamp is out of range",
+                             0);
+        return;
+    }
+    typed->AppendRaw(static_cast<int32_t>(days));
 }
 
 static void write_datetime(ColumnRef &col, zval *value)
@@ -318,13 +552,13 @@ static void write_datetime(ColumnRef &col, zval *value)
         zend_throw_exception(clickhouse_ce_ValidationException, "Column type mismatch", 0);
         return;
     }
-    zend_long timestamp;
-    if (!zval_to_integral<zend_long>(value, timestamp)) {
+    uint32_t timestamp;
+    if (!zval_to_integral<uint32_t>(value, timestamp)) {
         zend_throw_exception(clickhouse_ce_ValidationException,
-                             "DateTime column expects integer timestamp", 0);
+                             "DateTime timestamp is out of range", 0);
         return;
     }
-    typed->Append(static_cast<std::time_t>(timestamp));
+    typed->AppendRaw(timestamp);
 }
 
 static void append_default_value(ColumnRef &col)
@@ -678,8 +912,18 @@ static void write_datetime64(ColumnRef &col, zval *value)
                                     "Invalid DateTime64 value: %s", str);
             return;
         }
+        if (!is_valid_calendar_time(tm_buf)) {
+            zend_throw_exception_ex(clickhouse_ce_ValidationException, 0,
+                                    "Invalid DateTime64 value: %s", str);
+            return;
+        }
 
-        int64_t seconds = static_cast<int64_t>(timegm(&tm_buf));
+        int64_t seconds = 0;
+        if (!datetime_in_timezone_to_epoch(tm_buf, typed->Timezone(), seconds)) {
+            zend_throw_exception_ex(clickhouse_ce_ValidationException, 0,
+                                    "Invalid DateTime64 timezone or value: %s", str);
+            return;
+        }
         int64_t frac = 0;
         size_t precision = typed->GetPrecision();
 
@@ -731,12 +975,21 @@ static void write_datetime64(ColumnRef &col, zval *value)
         int64_t divisor = 1;
         for (size_t i = 0; i < precision; ++i)
             divisor *= 10;
-        typed->Append(seconds * divisor + frac);
+        Int128 ticks =
+            static_cast<Int128>(seconds) * static_cast<Int128>(divisor) + static_cast<Int128>(frac);
+        if (ticks < static_cast<Int128>(std::numeric_limits<int64_t>::min()) ||
+            ticks > static_cast<Int128>(std::numeric_limits<int64_t>::max())) {
+            zend_throw_exception_ex(clickhouse_ce_ValidationException, 0,
+                                    "DateTime64 value is out of range: %s", str);
+            return;
+        }
+        typed->Append(static_cast<int64_t>(ticks));
         return;
     }
 
-    /* Fall back: convert to long */
-    typed->Append(static_cast<Int64>(zval_get_long(value)));
+    zend_throw_exception(clickhouse_ce_ValidationException,
+                         "DateTime64 column expects YYYY-MM-DD HH:MM:SS string or integer ticks",
+                         0);
 }
 
 static void write_decimal(ColumnRef &col, zval *value)
@@ -747,8 +1000,17 @@ static void write_decimal(ColumnRef &col, zval *value)
         return;
     }
     zend_string *str = zval_get_string(value);
-    typed->Append(std::string(ZSTR_VAL(str), ZSTR_LEN(str)));
+    std::string decimal(ZSTR_VAL(str), ZSTR_LEN(str));
     zend_string_release(str);
+
+    if (!decimal_value_fits_precision(decimal, typed->GetPrecision(), typed->GetScale())) {
+        zend_throw_exception_ex(clickhouse_ce_ValidationException, 0,
+                                "Decimal value is invalid or exceeds precision %zu: %s",
+                                typed->GetPrecision(), decimal.c_str());
+        return;
+    }
+
+    typed->Append(decimal);
 }
 
 static void write_ipv4(ColumnRef &col, zval *value)
@@ -763,7 +1025,14 @@ static void write_ipv4(ColumnRef &col, zval *value)
         typed->Append(std::string(Z_STRVAL_P(value), Z_STRLEN_P(value)));
     } else {
         /* Numeric: treat as host-byte-order uint32 */
-        typed->Append(static_cast<uint32_t>(zval_get_long(value)));
+        uint32_t parsed = 0;
+        if (!zval_to_integral<uint32_t>(value, parsed)) {
+            zend_throw_exception(
+                clickhouse_ce_ValidationException,
+                "IPv4 column expects an address string or integer in the UInt32 range", 0);
+            return;
+        }
+        typed->Append(parsed);
     }
 }
 

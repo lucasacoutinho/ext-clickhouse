@@ -348,11 +348,8 @@ ZEND_METHOD(ClickHouse_Driver_Client, selectWithExternalData)
     }
     ZEND_HASH_FOREACH_END();
 
-    std::string sql(ZSTR_VAL(query), ZSTR_LEN(query));
-    std::string qid =
-        query_id ? std::string(ZSTR_VAL(query_id), ZSTR_LEN(query_id)) : std::string();
-
-    intern->client->SelectWithExternalData(sql, qid, tables, [&](const clickhouse::Block &block) {
+    auto q = build_query(query, params, settings, query_id);
+    q.OnData([&](const clickhouse::Block &block) {
         size_t rows = block.GetRowCount();
         size_t cols = block.GetColumnCount();
         if (rows == 0)
@@ -370,6 +367,7 @@ ZEND_METHOD(ClickHouse_Driver_Client, selectWithExternalData)
             add_next_index_zval(return_value, &row);
         }
     });
+    intern->client->SelectWithExternalData(q, tables);
     CLICKHOUSE_CATCH_RETURN
 }
 

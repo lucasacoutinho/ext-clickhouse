@@ -29,6 +29,15 @@ $ids = array_column($rows, 'number');
 sort($ids);
 var_dump($ids);
 
+// Params and settings must use the same native Query path as other selects.
+$rows = $client->selectWithExternalData(
+    'SELECT id FROM _ext_ids WHERE id >= {minimum:UInt64} ORDER BY id',
+    [['name' => '_ext_ids', 'data' => $block]],
+    ['minimum' => 3],
+    ['limit' => 2]
+);
+var_dump(array_column($rows, 'id'));
+
 // --- Edge case: malformed entries are silently skipped ---
 // All these pass invalid external table entries, but the query itself
 // doesn't reference any external table, so it should just return results.
@@ -87,6 +96,12 @@ array(4) {
   int(5)
   [3]=>
   int(7)
+}
+array(2) {
+  [0]=>
+  int(3)
+  [1]=>
+  int(5)
 }
 Missing data key: count=1
 Non-Block data: count=1

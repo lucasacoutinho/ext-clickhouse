@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -120,6 +121,17 @@ static bool php_clickhouse_zval_to_enum_value(zval *value, zend_class_entry *ce,
     return false;
 }
 
+static bool php_clickhouse_validate_numeric_option(const char *name, zend_long value,
+                                                   zend_long minimum, uint64_t maximum)
+{
+    if (value < minimum || static_cast<uint64_t>(value) > maximum) {
+        zend_throw_exception_ex(clickhouse_ce_ValidationException, 0,
+                                "ClientOptions parameter %s is out of range", name);
+        return false;
+    }
+    return true;
+}
+
 ZEND_METHOD(ClickHouse_Driver_ClientOptions, __construct)
 {
     zend_string *host = nullptr;
@@ -167,6 +179,31 @@ ZEND_METHOD(ClickHouse_Driver_ClientOptions, __construct)
     Z_PARAM_LONG(max_compression_chunk_size)
     ZEND_PARSE_PARAMETERS_END();
 
+    const uint64_t unsigned_int_max =
+        static_cast<uint64_t>(std::numeric_limits<unsigned int>::max());
+    const uint64_t zend_long_max = static_cast<uint64_t>(ZEND_LONG_MAX);
+
+    if (!php_clickhouse_validate_numeric_option("port", port, 1, UINT16_MAX) ||
+        !php_clickhouse_validate_numeric_option("sendRetries", send_retries, 0, unsigned_int_max) ||
+        !php_clickhouse_validate_numeric_option("retryTimeoutSeconds", retry_timeout_seconds, 0,
+                                                zend_long_max) ||
+        !php_clickhouse_validate_numeric_option("connectTimeoutMs", connect_timeout_ms, 0,
+                                                zend_long_max) ||
+        !php_clickhouse_validate_numeric_option("recvTimeoutMs", recv_timeout_ms, 0,
+                                                zend_long_max) ||
+        !php_clickhouse_validate_numeric_option("sendTimeoutMs", send_timeout_ms, 0,
+                                                zend_long_max) ||
+        !php_clickhouse_validate_numeric_option("tcpKeepAliveIdleSeconds", tcp_keepalive_idle, 0,
+                                                zend_long_max) ||
+        !php_clickhouse_validate_numeric_option("tcpKeepAliveIntervalSeconds",
+                                                tcp_keepalive_interval, 0, zend_long_max) ||
+        !php_clickhouse_validate_numeric_option("tcpKeepAliveCount", tcp_keepalive_count, 0,
+                                                unsigned_int_max) ||
+        !php_clickhouse_validate_numeric_option("maxCompressionChunkSize",
+                                                max_compression_chunk_size, 1, unsigned_int_max)) {
+        return;
+    }
+
     auto *intern = Z_CLICKHOUSE_OPTIONS_P(ZEND_THIS);
 
     CLICKHOUSE_TRY
@@ -209,7 +246,15 @@ ZEND_METHOD(ClickHouse_Driver_ClientOptions, __construct)
             }
             zval *p = zend_hash_str_find(ep_ht, "port", sizeof("port") - 1);
             if (p) {
-                ep.port = static_cast<uint16_t>(zval_get_long(p));
+                if (Z_TYPE_P(p) != IS_LONG || !php_clickhouse_validate_numeric_option(
+                                                  "endpoints.port", Z_LVAL_P(p), 1, UINT16_MAX)) {
+                    if (!EG(exception)) {
+                        zend_throw_exception(clickhouse_ce_ValidationException,
+                                             "ClientOptions endpoint port must be an integer", 0);
+                    }
+                    return;
+                }
+                ep.port = static_cast<uint16_t>(Z_LVAL_P(p));
             }
             eps.push_back(std::move(ep));
         }

@@ -28,6 +28,29 @@ $opts2 = new ClientOptions(
 );
 var_dump($opts2 instanceof ClientOptions);
 
+$constructor = new ReflectionMethod(ClientOptions::class, '__construct');
+$parameters = $constructor->getParameters();
+echo "Constructor parameters: " . count($parameters) . "\n";
+echo "Extended parameters: " .
+    implode(', ', array_map(
+        static fn(ReflectionParameter $parameter): string => $parameter->getName(),
+        array_slice($parameters, 15)
+    )) . "\n";
+
+if (PHP_VERSION_ID >= 80000) {
+    $namedOptions = (new ReflectionClass(ClientOptions::class))->newInstanceArgs([
+        'endpoints' => [],
+        'tcpKeepAliveIdleSeconds' => 30,
+        'maxCompressionChunkSize' => 32768,
+    ]);
+} else {
+    $namedOptions = new ClientOptions(
+        'localhost', 9000, 'default', 'default', '', CompressionMethod::None,
+        false, 1, 5, false, true, 5000, 0, 0, null, [], 30, 5, 3, 32768
+    );
+}
+var_dump($namedOptions instanceof ClientOptions);
+
 if (getenv('CLICKHOUSE_SANITIZER')) {
     var_dump(true);
 } else {
@@ -67,6 +90,9 @@ echo "OK\n";
 ?>
 --EXPECT--
 bool(true)
+bool(true)
+Constructor parameters: 20
+Extended parameters: endpoints, tcpKeepAliveIdleSeconds, tcpKeepAliveIntervalSeconds, tcpKeepAliveCount, maxCompressionChunkSize
 bool(true)
 bool(true)
 OK
