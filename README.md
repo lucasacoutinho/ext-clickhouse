@@ -17,7 +17,10 @@ On PHP 8.1+, `ClickHouse\Driver\CompressionMethod` and `ClickHouse\Driver\Type` 
 
 `clickhouse-cpp` is pinned as a git submodule and built into `clickhouse.so`; users do not install `clickhouse-cpp` separately. The extension has its own release version, and each release documents the embedded `clickhouse-cpp` version. `phpinfo()` also reports the embedded C++ client version.
 
-The current submodule pin is `clickhouse-cpp` `v2.6.0`.
+The current submodule pin reports `clickhouse-cpp` `v2.6.2`. It uses upstream
+commit `706dd4d`, the first post-tag merge that contains both the `v2.6.2`
+release and the accepted `Query` overload required to preserve parameters,
+settings, query IDs, and callbacks for external-data queries.
 
 To upgrade the C++ client, bump the submodule to an upstream `clickhouse-cpp` tag, run the full PHP matrix, then publish a new extension release. Release source archives must include the initialized submodule so PIE can build without requiring git submodule operations.
 

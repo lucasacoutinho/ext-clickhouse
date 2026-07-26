@@ -22,6 +22,10 @@ var_dump(clickhouse_case_value(Type::Nullable));
 var_dump(clickhouse_case_value(Type::Array));
 var_dump(clickhouse_case_value(Type::Map));
 var_dump(clickhouse_case_value(Type::DateTime64));
+var_dump(clickhouse_case_value(Type::Time));
+var_dump(clickhouse_case_value(Type::Time64));
+var_dump(clickhouse_case_value(Type::JSON));
+var_dump(clickhouse_case_value(Type::Bool));
 
 // Backed enum from value on PHP 8.1+, compatible constant fallback on older PHP.
 var_dump(clickhouse_enum_like_from(Type::class, 11) === Type::String);
@@ -38,5 +42,9 @@ int(16)
 int(15)
 int(32)
 int(30)
+int(37)
+int(38)
+int(39)
+int(40)
 bool(true)
 bool(true)

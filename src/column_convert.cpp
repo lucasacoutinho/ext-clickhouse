@@ -2,18 +2,21 @@
 #include "src/common.h"
 
 #include "clickhouse/columns/array.h"
+#include "clickhouse/columns/bool.h"
 #include "clickhouse/columns/date.h"
 #include "clickhouse/columns/decimal.h"
 #include "clickhouse/columns/enum.h"
 #include "clickhouse/columns/geo.h"
 #include "clickhouse/columns/ip4.h"
 #include "clickhouse/columns/ip6.h"
+#include "clickhouse/columns/json.h"
 #include "clickhouse/columns/lowcardinality.h"
 #include "clickhouse/columns/map.h"
 #include "clickhouse/columns/nothing.h"
 #include "clickhouse/columns/nullable.h"
 #include "clickhouse/columns/numeric.h"
 #include "clickhouse/columns/string.h"
+#include "clickhouse/columns/time.h"
 #include "clickhouse/columns/tuple.h"
 #include "clickhouse/columns/uuid.h"
 #include "clickhouse/types/types.h"
@@ -76,9 +79,22 @@ static inline void numeric_to_zval_double(const ColumnRef &col, size_t index, zv
     ZVAL_DOUBLE(rv, static_cast<double>(typed->At(index)));
 }
 
+static void bool_to_zval(const ColumnRef &col, size_t index, zval *rv)
+{
+    auto typed = col->As<ColumnBool>();
+    ZVAL_BOOL(rv, typed->At(index));
+}
+
 static void string_to_zval(const ColumnRef &col, size_t index, zval *rv)
 {
     auto typed = col->As<ColumnString>();
+    std::string_view sv = typed->At(index);
+    ZVAL_STRINGL(rv, sv.data(), sv.size());
+}
+
+static void json_to_zval(const ColumnRef &col, size_t index, zval *rv)
+{
+    auto typed = col->As<ColumnJSON>();
     std::string_view sv = typed->At(index);
     ZVAL_STRINGL(rv, sv.data(), sv.size());
 }
@@ -116,6 +132,18 @@ static void datetime64_to_zval(const ColumnRef &col, size_t index, zval *rv)
     auto precision = typed->Type()->As<DateTime64Type>()->GetPrecision();
     int64_t val = typed->At(index);
     datetime64_value_to_zval(val, precision, rv);
+}
+
+static void time_to_zval(const ColumnRef &col, size_t index, zval *rv)
+{
+    auto typed = col->As<ColumnTime>();
+    ZVAL_LONG(rv, static_cast<zend_long>(typed->At(index)));
+}
+
+static void time64_to_zval(const ColumnRef &col, size_t index, zval *rv)
+{
+    auto typed = col->As<ColumnTime64>();
+    ZVAL_LONG(rv, static_cast<zend_long>(typed->At(index)));
 }
 
 static void datetime64_value_to_zval(int64_t val, size_t precision, zval *rv)
@@ -422,6 +450,9 @@ static void lowcardinality_to_zval(const ColumnRef &col, size_t index, zval *rv)
     case Type::Float64:
         ZVAL_DOUBLE(rv, item.get<double>());
         break;
+    case Type::Bool:
+        ZVAL_BOOL(rv, item.get<uint8_t>() != 0);
+        break;
 
     case Type::Date: {
         std::time_t t = static_cast<std::time_t>(item.get<uint16_t>()) * 86400;
@@ -450,6 +481,17 @@ static void lowcardinality_to_zval(const ColumnRef &col, size_t index, zval *rv)
         datetime64_value_to_zval(item.get<int64_t>(),
                                  value_type->As<DateTime64Type>()->GetPrecision(), rv);
         break;
+    case Type::Time:
+        ZVAL_LONG(rv, static_cast<zend_long>(item.get<int32_t>()));
+        break;
+    case Type::Time64:
+        ZVAL_LONG(rv, static_cast<zend_long>(item.get<int64_t>()));
+        break;
+    case Type::JSON: {
+        auto sv = item.get<std::string_view>();
+        ZVAL_STRINGL(rv, sv.data(), sv.size());
+        break;
+    }
 
     case Type::Enum8: {
         auto name = value_type->As<EnumType>()->GetEnumName(item.get<int8_t>());
@@ -654,12 +696,18 @@ void php_clickhouse_column_to_zval(const ColumnRef &col, size_t index, zval *ret
     case Type::Float64:
         numeric_to_zval_double<double>(col, index, return_value);
         break;
+    case Type::Bool:
+        bool_to_zval(col, index, return_value);
+        break;
 
     case Type::String:
         string_to_zval(col, index, return_value);
         break;
     case Type::FixedString:
         fixed_string_to_zval(col, index, return_value);
+        break;
+    case Type::JSON:
+        json_to_zval(col, index, return_value);
         break;
 
     case Type::Date:
@@ -673,6 +721,12 @@ void php_clickhouse_column_to_zval(const ColumnRef &col, size_t index, zval *ret
         break;
     case Type::DateTime64:
         datetime64_to_zval(col, index, return_value);
+        break;
+    case Type::Time:
+        time_to_zval(col, index, return_value);
+        break;
+    case Type::Time64:
+        time64_to_zval(col, index, return_value);
         break;
 
     case Type::Nullable:

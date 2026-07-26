@@ -62,7 +62,8 @@ static const php_clickhouse_enum_case php_clickhouse_type_cases[] = {
     {"Decimal64", 27},    {"Decimal128", 28}, {"LowCardinality", 29},
     {"DateTime64", 30},   {"Date32", 31},     {"Map", 32},
     {"Point", 33},        {"Ring", 34},       {"Polygon", 35},
-    {"MultiPolygon", 36}, {nullptr, 0},
+    {"MultiPolygon", 36}, {"Time", 37},       {"Time64", 38},
+    {"JSON", 39},         {"Bool", 40},       {nullptr, 0},
 };
 
 static bool php_clickhouse_enum_value_exists(const php_clickhouse_enum_case *cases, zend_long value)

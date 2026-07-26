@@ -58,6 +58,10 @@ function clickhouse_type_name($case)
         case 34: return 'Ring';
         case 35: return 'Polygon';
         case 36: return 'MultiPolygon';
+        case 37: return 'Time';
+        case 38: return 'Time64';
+        case 39: return 'JSON';
+        case 40: return 'Bool';
         default: return 'unknown';
     }
 }

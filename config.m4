@@ -69,6 +69,7 @@ if test "$PHP_CLICKHOUSE" != "no"; then
     clickhouse-cpp/clickhouse/base/wire_format.cpp \
     clickhouse-cpp/clickhouse/base/endpoints_iterator.cpp \
     clickhouse-cpp/clickhouse/columns/array.cpp \
+    clickhouse-cpp/clickhouse/columns/bool.cpp \
     clickhouse-cpp/clickhouse/columns/column.cpp \
     clickhouse-cpp/clickhouse/columns/date.cpp \
     clickhouse-cpp/clickhouse/columns/decimal.cpp \
@@ -86,6 +87,7 @@ if test "$PHP_CLICKHOUSE" != "no"; then
     clickhouse-cpp/clickhouse/columns/tuple.cpp \
     clickhouse-cpp/clickhouse/columns/uuid.cpp \
     clickhouse-cpp/clickhouse/columns/itemview.cpp \
+    clickhouse-cpp/clickhouse/columns/json.cpp \
     clickhouse-cpp/clickhouse/types/type_parser.cpp \
     clickhouse-cpp/clickhouse/types/types.cpp \
     clickhouse-cpp/clickhouse/block.cpp \
@@ -98,7 +100,9 @@ if test "$PHP_CLICKHOUSE" != "no"; then
       clickhouse-cpp/clickhouse/base/sslsocket.cpp"
   fi
 
-  CLICKHOUSE_CPP_CXX_FLAGS="$PHP_CLICKHOUSE_STDCXX -Wno-write-strings $CLICKHOUSE_OPENSSL_FLAGS"
+  dnl clickhouse-cpp v2.6.2's exceptions.h uses std::shared_ptr without
+  dnl including <memory>. Force-include it until the upstream fix is released.
+  CLICKHOUSE_CPP_CXX_FLAGS="$PHP_CLICKHOUSE_STDCXX -Wno-write-strings -include memory $CLICKHOUSE_OPENSSL_FLAGS"
 
   AS_VAR_IF([ext_shared], [no],
     [PHP_ADD_SOURCES([$ext_dir],
@@ -193,7 +197,7 @@ if test "$PHP_CLICKHOUSE" != "no"; then
   PHP_INSTALL_HEADERS([ext/clickhouse/clickhouse-cpp/clickhouse/base],
     [buffer.h compressed.h endpoints_iterator.h input.h open_telemetry.h output.h platform.h projected_iterator.h singleton.h socket.h sslsocket.h string_utils.h string_view.h uuid.h wire_format.h])
   PHP_INSTALL_HEADERS([ext/clickhouse/clickhouse-cpp/clickhouse/columns],
-    [array.h column.h date.h decimal.h enum.h factory.h geo.h ip4.h ip6.h itemview.h lowcardinality.h lowcardinalityadaptor.h map.h nothing.h nullable.h numeric.h string.h tuple.h utils.h uuid.h])
+    [array.h bool.h column.h date.h decimal.h enum.h factory.h geo.h ip4.h ip6.h itemview.h json.h lowcardinality.h lowcardinalityadaptor.h map.h nothing.h nullable.h numeric.h string.h time.h tuple.h utils.h uuid.h])
   PHP_INSTALL_HEADERS([ext/clickhouse/clickhouse-cpp/clickhouse/types],
     [type_parser.h types.h])
   PHP_INSTALL_HEADERS([ext/clickhouse/clickhouse-cpp/contrib/absl/absl/base],

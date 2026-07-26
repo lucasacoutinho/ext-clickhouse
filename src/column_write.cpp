@@ -6,14 +6,17 @@ extern "C" {
 }
 
 #include "clickhouse/columns/array.h"
+#include "clickhouse/columns/bool.h"
 #include "clickhouse/columns/date.h"
 #include "clickhouse/columns/decimal.h"
 #include "clickhouse/columns/enum.h"
 #include "clickhouse/columns/ip4.h"
 #include "clickhouse/columns/ip6.h"
+#include "clickhouse/columns/json.h"
 #include "clickhouse/columns/nullable.h"
 #include "clickhouse/columns/numeric.h"
 #include "clickhouse/columns/string.h"
+#include "clickhouse/columns/time.h"
 #include "clickhouse/columns/tuple.h"
 #include "clickhouse/columns/uuid.h"
 #include "clickhouse/columns/geo.h"
@@ -457,6 +460,62 @@ static void write_fixed_string(ColumnRef &col, zval *value)
     zend_string_release(str);
 }
 
+static void write_bool(ColumnRef &col, zval *value)
+{
+    auto typed = col->As<ColumnBool>();
+    if (!typed) {
+        zend_throw_exception(clickhouse_ce_ValidationException, "Column type mismatch", 0);
+        return;
+    }
+
+    uint8_t parsed;
+    if (!zval_to_integral<uint8_t>(value, parsed) || parsed > 1) {
+        zend_throw_exception(clickhouse_ce_ValidationException, "Bool column expects bool, 0, or 1",
+                             0);
+        return;
+    }
+    typed->Append(parsed != 0);
+}
+
+static void write_json(ColumnRef &col, zval *value)
+{
+    auto typed = col->As<ColumnJSON>();
+    if (!typed) {
+        zend_throw_exception(clickhouse_ce_ValidationException, "Column type mismatch", 0);
+        return;
+    }
+    if (Z_TYPE_P(value) != IS_STRING || Z_STRLEN_P(value) == 0) {
+        zend_throw_exception(clickhouse_ce_ValidationException,
+                             "JSON column expects a non-empty JSON string", 0);
+        return;
+    }
+    typed->Append(std::string_view(Z_STRVAL_P(value), Z_STRLEN_P(value)));
+}
+
+static void write_time(ColumnRef &col, zval *value)
+{
+    auto typed = col->As<ColumnTime>();
+    int32_t parsed;
+    if (!typed || !zval_to_integral<int32_t>(value, parsed)) {
+        zend_throw_exception(clickhouse_ce_ValidationException,
+                             "Time column expects a 32-bit integer value", 0);
+        return;
+    }
+    typed->Append(parsed);
+}
+
+static void write_time64(ColumnRef &col, zval *value)
+{
+    auto typed = col->As<ColumnTime64>();
+    int64_t parsed;
+    if (!typed || !zval_to_integral<int64_t>(value, parsed)) {
+        zend_throw_exception(clickhouse_ce_ValidationException,
+                             "Time64 column expects a 64-bit integer value", 0);
+        return;
+    }
+    typed->Append(parsed);
+}
+
 static void write_date(ColumnRef &col, zval *value)
 {
     auto typed = col->As<ColumnDate>();
@@ -594,12 +653,18 @@ static void append_default_value(ColumnRef &col)
     case Type::Float64:
         col->As<ColumnFloat64>()->Append(0.0);
         break;
+    case Type::Bool:
+        col->As<ColumnBool>()->Append(false);
+        break;
 
     case Type::String:
         col->As<ColumnString>()->Append(std::string_view(""));
         break;
     case Type::FixedString:
         col->As<ColumnFixedString>()->Append(std::string_view(""));
+        break;
+    case Type::JSON:
+        col->As<ColumnJSON>()->Append(std::string_view("{}"));
         break;
 
     case Type::Date:
@@ -613,6 +678,12 @@ static void append_default_value(ColumnRef &col)
         break;
     case Type::DateTime64:
         col->As<ColumnDateTime64>()->Append(0);
+        break;
+    case Type::Time:
+        col->As<ColumnTime>()->Append(0);
+        break;
+    case Type::Time64:
+        col->As<ColumnTime64>()->Append(0);
         break;
 
     case Type::Decimal:
@@ -1528,12 +1599,18 @@ void php_clickhouse_zval_to_column(ColumnRef &col, zval *value)
     case Type::Float64:
         write_float<double>(col, value);
         break;
+    case Type::Bool:
+        write_bool(col, value);
+        break;
 
     case Type::String:
         write_string(col, value);
         break;
     case Type::FixedString:
         write_fixed_string(col, value);
+        break;
+    case Type::JSON:
+        write_json(col, value);
         break;
 
     case Type::Date:
@@ -1547,6 +1624,12 @@ void php_clickhouse_zval_to_column(ColumnRef &col, zval *value)
         break;
     case Type::DateTime64:
         write_datetime64(col, value);
+        break;
+    case Type::Time:
+        write_time(col, value);
+        break;
+    case Type::Time64:
+        write_time64(col, value);
         break;
 
     case Type::Decimal:

@@ -51,6 +51,10 @@ enum Type: int {
     case Ring = 34;
     case Polygon = 35;
     case MultiPolygon = 36;
+    case Time = 37;
+    case Time64 = 38;
+    case JSON = 39;
+    case Bool = 40;
 }
 
 final class ClientOptions {

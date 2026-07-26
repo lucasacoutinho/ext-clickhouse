@@ -1,4 +1,5 @@
 /* This PHP 7.4-compatible arginfo is maintained from clickhouse.stub.php.
+ * Type enum cases through Bool (40) are registered in client_options.cpp.
  * Validate the canonical stub with:
  *   php build/gen_stub.php -f clickhouse.stub.php
  */
