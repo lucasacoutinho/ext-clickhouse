@@ -55,6 +55,6 @@ jobs:
           tar -C "$RUNNER_TEMP" -czf "dist/php_clickhouse-$version-src.tgz" "$package_dir"
 
       - name: Upload source package
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/php_clickhouse-*-src.tgz
