@@ -6,17 +6,17 @@ clickhouse
 <?php
 use ClickHouse\Driver\Column;
 
-// Decimal — stored as string to preserve precision
+// Store Decimal as a string to preserve precision.
 $col = Column::create('Decimal(18,4)', ['123.4567', '0.0001', '-99999.9999']);
 var_dump($col->size());
 var_dump($col->getTypeName());
 
-// DateTime — unix timestamp
+// DateTime uses a Unix timestamp.
 $col = Column::create('DateTime', [0, 1704067200]);
 var_dump($col->at(0));
 var_dump($col->at(1));
 
-// Date — string 'Y-m-d'
+// Date uses a 'Y-m-d' string.
 $col = Column::create('Date', ['2024-01-01', '1970-01-01']);
 var_dump($col->size());
 

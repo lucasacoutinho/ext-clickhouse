@@ -212,7 +212,7 @@ void php_clickhouse_create_block_from_cpp(zval *return_value, const clickhouse::
     object_init_ex(return_value, clickhouse_ce_Block);
     auto *intern = Z_CLICKHOUSE_BLOCK_P(return_value);
 
-    /* Copy the block — shares column refs via shared_ptr */
+    /* Copy the block. This shares column refs through shared_ptr. */
     intern->block = std::make_unique<clickhouse::Block>();
     for (size_t i = 0; i < cpp_block.GetColumnCount(); ++i) {
         intern->block->AppendColumn(cpp_block.GetColumnName(i), cpp_block[i]);

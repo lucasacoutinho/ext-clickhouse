@@ -1484,9 +1484,9 @@ static bool parse_points_from_zval(zval *value, std::shared_ptr<ColumnPoint> &po
  * ColumnGeo::Append(ColumnRef) checks column->As<ColumnGeo>(), so we must build
  * a temporary column of the SAME geo type with one row, then Append to merge.
  *
- * Ring    = ColumnGeo<ColumnArrayT<ColumnPoint>>       — one row = array of points
- * Polygon = ColumnGeo<ColumnArrayT<ColumnRing>>        — one row = array of rings
- * MultiPo = ColumnGeo<ColumnArrayT<ColumnPolygon>>     — one row = array of polygons
+ * Ring    = ColumnGeo<ColumnArrayT<ColumnPoint>>       where one row is an array of points
+ * Polygon = ColumnGeo<ColumnArrayT<ColumnRing>>        where one row is an array of rings
+ * MultiPo = ColumnGeo<ColumnArrayT<ColumnPolygon>>     where one row is an array of polygons
  */
 static void write_ring(ColumnRef &col, zval *value)
 {

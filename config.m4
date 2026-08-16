@@ -47,7 +47,7 @@ if test "$PHP_CLICKHOUSE" != "no"; then
     PHP_EVAL_LIBLINE($OPENSSL_LIBS, CLICKHOUSE_SHARED_LIBADD)
     CLICKHOUSE_OPENSSL_FLAGS="-DWITH_OPENSSL=1"
   ], [
-    AC_MSG_WARN([OpenSSL not found — building without TLS support])
+    AC_MSG_WARN([OpenSSL not found. Building without TLS support])
     CLICKHOUSE_OPENSSL_FLAGS=""
   ])
 

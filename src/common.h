@@ -119,7 +119,7 @@ static inline zend_result php_clickhouse_enum_get_case(zend_object **result, zen
 }
 #endif
 
-/* Generic from_obj using XtOffsetOf — used by per-class macros */
+/* Generic from_obj using XtOffsetOf for per-class macros. */
 template <typename T> static inline T *php_clickhouse_from_obj(zend_object *obj, size_t offset)
 {
     return reinterpret_cast<T *>(reinterpret_cast<char *>(obj) - offset);

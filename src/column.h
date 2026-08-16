@@ -6,7 +6,7 @@
 
 struct php_clickhouse_column
 {
-    clickhouse::ColumnRef column; /* shared_ptr — shared with Block */
+    clickhouse::ColumnRef column; /* shared_ptr also held by Block */
     zend_object std;
 };
 
