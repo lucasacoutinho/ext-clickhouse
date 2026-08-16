@@ -791,7 +791,7 @@ void php_clickhouse_column_to_zval(const ColumnRef &col, size_t index, zval *ret
         break;
 
     default:
-        /* Unknown type — return string representation via ItemView */
+        /* Return an unknown type as a string through ItemView. */
         try {
             auto item = col->GetItem(index);
             auto sv = item.get<std::string_view>();

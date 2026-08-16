@@ -58,7 +58,7 @@ extern zend_module_entry clickhouse_module_entry;
 }
 #define phpext_clickhouse_ptr &clickhouse_module_entry
 
-/* Class entries — declared in their respective .cpp files, externed here */
+/* Class entries are declared in their respective .cpp files and externed here. */
 extern zend_class_entry *clickhouse_ce_ClientOptions;
 extern zend_class_entry *clickhouse_ce_Client;
 extern zend_class_entry *clickhouse_ce_Block;

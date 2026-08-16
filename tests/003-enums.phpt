@@ -14,7 +14,7 @@ var_dump(clickhouse_case_value(CompressionMethod::None));
 var_dump(clickhouse_case_value(CompressionMethod::LZ4));
 var_dump(clickhouse_case_value(CompressionMethod::ZSTD));
 
-// Type enum — spot check key values
+// Spot-check key Type enum values.
 var_dump(clickhouse_case_value(Type::Int8));
 var_dump(clickhouse_case_value(Type::UInt64));
 var_dump(clickhouse_case_value(Type::String));

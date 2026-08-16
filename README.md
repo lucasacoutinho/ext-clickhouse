@@ -1,72 +1,36 @@
-# ext-clickhouse
+<div align="center">
+  <h1>ext-clickhouse</h1>
+  <p>
+    A native ClickHouse client for PHP. It speaks the native TCP protocol and
+    ships the C++ client inside <code>clickhouse.so</code>.
+  </p>
+  <p>
+    <a href="https://github.com/lucasacoutinho/ext-clickhouse/actions/workflows/ci.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/lucasacoutinho/ext-clickhouse/ci.yml?branch=main&style=for-the-badge&labelColor=000000"></a>
+    <a href="https://packagist.org/packages/lucasacoutinho/ext-clickhouse"><img alt="Packagist version" src="https://img.shields.io/packagist/v/lucasacoutinho/ext-clickhouse?style=for-the-badge&labelColor=000000"></a>
+    <a href="#requirements"><img alt="PHP 7.4 through 8.5" src="https://img.shields.io/badge/PHP-7.4%20to%208.5-777BB4?style=for-the-badge&logo=php&logoColor=white&labelColor=000000"></a>
+    <a href="https://github.com/lucasacoutinho/ext-clickhouse/blob/main/LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/lucasacoutinho/ext-clickhouse?style=for-the-badge&labelColor=000000"></a>
+  </p>
+</div>
 
-A PHP extension providing native TCP access to ClickHouse using the [clickhouse-cpp](https://github.com/ClickHouse/clickhouse-cpp) C++ client library. Communicates over the ClickHouse native protocol with LZ4/ZSTD compression support.
+## Getting started
 
-## Requirements
-
-- PHP 7.4, 8.0, 8.1, 8.2, 8.3, 8.4, or 8.5
-- C++17 compiler (GCC 8+ or Clang 7+)
-
-## PHP version support
-
-CI builds and tests the extension on PHP 7.4, 8.0, 8.1, 8.2, 8.3, 8.4, and 8.5.
-
-On PHP 8.1+, `ClickHouse\Driver\CompressionMethod` and `ClickHouse\Driver\Type` are native backed enums. On PHP 7.4 and 8.0, the same names are final classes with integer constants, so code can still use constants such as `CompressionMethod::LZ4`. Methods returning `Type` return integer constants on PHP 7.4 and 8.0, and enum cases on PHP 8.1+.
-
-## clickhouse-cpp versioning
-
-`clickhouse-cpp` is pinned as a git submodule and built into `clickhouse.so`; users do not install `clickhouse-cpp` separately. The extension has its own release version, and each release documents the embedded `clickhouse-cpp` version. `phpinfo()` also reports the embedded C++ client version.
-
-The current submodule pin reports `clickhouse-cpp` `v2.6.2`. It uses upstream
-commit `737145d`, a reviewed post-tag snapshot that retains the accepted `Query`
-overload and adds identifier escaping, client move support, and the upstream
-CityHash and wide-integer build changes.
-
-To upgrade the C++ client, prefer an upstream `clickhouse-cpp` tag. A post-tag
-pin must document the required upstream fixes and pass the full PHP matrix.
-Release source archives must include the initialized submodule so PIE can build
-without requiring git submodule operations.
-
-For release builds, treat the submodule SHA as part of the extension source. Do not link against a system-installed `clickhouse-cpp` by default; that would make extension behavior depend on distro packaging and local C++ ABI choices.
-
-Release versioning is independent from `clickhouse-cpp`: dependency-only bugfix or security bumps can be patch releases, observable protocol/type/TLS support changes should be minor releases, and PHP API/ABI breaks require a major release.
-## Build
-
-```bash
-git clone --recursive https://github.com/lucasacoutinho/ext-clickhouse.git
-cd ext-clickhouse
-
-phpize
-./configure --enable-clickhouse
-make
-make install
-```
-
-If you cloned without `--recursive`, fetch the submodule:
-
-```bash
-git submodule update --init --recursive
-```
-
-Add to your `php.ini`:
-
-```ini
-extension=clickhouse
-```
-
-## Install with PIE
+Install the extension with [PIE](https://github.com/php/pie):
 
 ```bash
 pie install lucasacoutinho/ext-clickhouse
 ```
 
-## Usage
+Enable it in `php.ini`:
+
+```ini
+extension=clickhouse
+```
+
+Create a client and check the connection:
 
 ```php
 use ClickHouse\Driver\Client;
 use ClickHouse\Driver\ClientOptions;
-use ClickHouse\Driver\Block;
-use ClickHouse\Driver\Column;
 use ClickHouse\Driver\CompressionMethod;
 
 $client = new Client(new ClientOptions(
@@ -79,30 +43,66 @@ $client = new Client(new ClientOptions(
 ));
 
 $client->ping();
+```
 
-// DDL
-$client->execute('CREATE TABLE IF NOT EXISTS test (id UInt64, name String) ENGINE = Memory');
+The driver connects to ClickHouse over its native TCP port, usually `9000`.
+It supports LZ4 and ZSTD compression, TLS, typed columns, inserts, and
+block-by-block result streaming without an HTTP or cURL transport.
 
-// Insert
+## Requirements
+
+| Component | Supported version |
+| --- | --- |
+| PHP | 7.4 through 8.5 |
+| Compiler for source builds | GCC 8+, Clang 7+, or another C++17 compiler |
+| ClickHouse C++ client | Bundled with the extension |
+
+CI builds and tests every supported PHP version.
+
+On PHP 8.1+, `ClickHouse\Driver\CompressionMethod` and
+`ClickHouse\Driver\Type` are native backed enums. PHP 7.4 and 8.0 expose the
+same names as final classes with integer constants. Code can use constants
+such as `CompressionMethod::LZ4` on every supported PHP version. Methods that
+return `Type` return integer constants on PHP 7.4 and 8.0, and enum cases on
+PHP 8.1+.
+
+## Working with data
+
+```php
+use ClickHouse\Driver\Block;
+use ClickHouse\Driver\Column;
+
+$client->execute(
+    'CREATE TABLE IF NOT EXISTS test '
+    . '(id UInt64, name String) ENGINE = Memory'
+);
+
 $block = new Block();
 $block->appendColumn('id', Column::create('UInt64', [1, 2, 3]));
-$block->appendColumn('name', Column::create('String', ['Alice', 'Bob', 'Charlie']));
+$block->appendColumn(
+    'name',
+    Column::create('String', ['Alice', 'Bob', 'Charlie'])
+);
+
 $client->insert('test', $block);
 
-// Select
-$rows = $client->select('SELECT * FROM test');
+$rows = $client->select('SELECT * FROM test ORDER BY id');
 
-// Block-by-block streaming
 $client->selectByBlock('SELECT * FROM test', function (Block $block): void {
     foreach ($block->toArray() as $row) {
-        // process row
+        // Process one result block at a time.
     }
 });
 ```
 
-### TLS
+The public PHP API is declared in
+[`clickhouse.stub.php`](clickhouse.stub.php).
 
-Pass an SSL option array as the 15th `ClientOptions` constructor argument. Defaults are secure when SSL is enabled: system CA locations and SNI are enabled unless explicitly overridden.
+## TLS
+
+Pass an SSL option array as the 15th `ClientOptions` constructor argument.
+When SSL is enabled, the client uses system CA locations and SNI unless the
+options override them.
 
 ```php
 $client = new Client(new ClientOptions(
@@ -128,26 +128,79 @@ $client = new Client(new ClientOptions(
 ));
 ```
 
-## Docker
+## Build from source
 
-Pre-built images are available on GitHub Container Registry:
+Clone the initialized submodule, then use the standard PHP extension build
+flow:
 
 ```bash
+git clone --recursive https://github.com/lucasacoutinho/ext-clickhouse.git
+cd ext-clickhouse
+
+phpize
+./configure --enable-clickhouse
+make
+make install
+```
+
+If the repository was cloned without `--recursive`, initialize the dependency
+before building:
+
+```bash
+git submodule update --init --recursive
+```
+
+## Docker
+
+Versioned and rolling images are published for each supported PHP release:
+
+```bash
+docker pull ghcr.io/lucasacoutinho/ext-clickhouse:php8.5-v1.3.0
 docker pull ghcr.io/lucasacoutinho/ext-clickhouse:php8.5-latest
 ```
 
-Or build locally:
+Build the image locally with a different PHP version when needed:
 
 ```bash
 docker build --build-arg PHP_VERSION=8.5 -t ext-clickhouse .
 ```
 
-## Running tests
+## Bundled clickhouse-cpp
+
+The repository pins `clickhouse-cpp` as a git submodule and compiles it into
+`clickhouse.so`. Users do not install or link a separate system copy.
+`phpinfo()` reports the embedded client version.
+
+The v1.3 release line reports `clickhouse-cpp` v2.6.2 and uses upstream commit
+`737145d`. This reviewed post-tag snapshot retains the accepted `Query`
+overload and includes identifier escaping, client move support, and upstream
+CityHash and wide-integer build changes.
+
+The submodule SHA is part of the extension source and release contract. New
+pins should prefer upstream tags. A post-tag pin must document the fixes it
+needs and pass the full PHP matrix. Source archives include the initialized
+submodule so PIE can build without running git commands.
+
+Extension releases use their own version numbers. A dependency-only bug fix or
+security update can be a patch release. Observable protocol, type, or TLS
+changes require a minor release. PHP API or ABI breaks require a major release.
+
+## Testing
+
+Run the PHPT suite against a live ClickHouse server:
 
 ```bash
-# Requires a running ClickHouse instance
 CLICKHOUSE_HOST=127.0.0.1 make test
 ```
+
+The GitHub Actions matrix also runs integration tests, sanitizers, coverage,
+formatting, and clang-tidy on every supported PHP version.
+
+## Contributing
+
+Bug reports and focused pull requests are welcome. Open an
+[issue](https://github.com/lucasacoutinho/ext-clickhouse/issues) with the PHP
+version, ClickHouse version, and a minimal reproduction for driver problems.
 
 ## License
 
