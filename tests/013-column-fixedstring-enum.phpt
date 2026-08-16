@@ -36,6 +36,11 @@ var_dump($col->at(1));
 var_dump($col->at(2));
 var_dump($col->at(3));
 
+// Escaped enum labels round-trip through the clickhouse-cpp type parser.
+$escaped = Column::create("Enum8('a\\'b' = 1, 'a\\\\b' = 2)", ["a'b", "a\\b"]);
+echo "Enum8 escaped type: " . $escaped->getTypeName() . "\n";
+var_dump($escaped->toArray());
+
 // --- Enum16 ---
 $col = Column::create("Enum16('red' = 100, 'green' = 200, 'blue' = 300)", ['green', 'blue', 'red']);
 echo "\nEnum16 size: " . $col->size() . "\n";
@@ -62,6 +67,13 @@ string(5) "apple"
 string(6) "banana"
 string(6) "cherry"
 string(5) "apple"
+Enum8 escaped type: Enum8('a\'b' = 1, 'a\\b' = 2)
+array(2) {
+  [0]=>
+  string(3) "a'b"
+  [1]=>
+  string(3) "a\b"
+}
 
 Enum16 size: 3
 Enum16 type enum: Enum16

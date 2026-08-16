@@ -51,8 +51,9 @@ jobs:
           ./configure --enable-clickhouse
           php_includes="$(php-config --includes)"
           common_args="-std=c++17 -DHAVE_CONFIG_H=1 -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 \
+            -DCH_USE_ABSEIL_FOR_BIGNUM=1 \
             -I. -Iclickhouse-cpp -Iclickhouse-cpp/contrib/absl \
-            -Iclickhouse-cpp/contrib/cityhash/cityhash -Iclickhouse-cpp/contrib/lz4/lz4 \
+            -Iclickhouse-cpp/clickhouse/cityhash -Iclickhouse-cpp/contrib/lz4/lz4 \
             -Iclickhouse-cpp/contrib/zstd/zstd $php_includes"
           git ls-files '*.cpp' \
             | grep -Ev '^(clickhouse-cpp|build)/' \

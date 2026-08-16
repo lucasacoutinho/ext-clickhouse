@@ -24,7 +24,7 @@ if test "$PHP_CLICKHOUSE" != "no"; then
 
   PHP_ADD_INCLUDE([$ext_srcdir/clickhouse-cpp])
   PHP_ADD_INCLUDE([$ext_srcdir/clickhouse-cpp/contrib/absl])
-  PHP_ADD_INCLUDE([$ext_srcdir/clickhouse-cpp/contrib/cityhash/cityhash])
+  PHP_ADD_INCLUDE([$ext_srcdir/clickhouse-cpp/clickhouse/cityhash])
   PHP_ADD_INCLUDE([$ext_srcdir/clickhouse-cpp/contrib/lz4/lz4])
   PHP_ADD_INCLUDE([$ext_srcdir/clickhouse-cpp/contrib/zstd/zstd])
   PHP_ADD_INCLUDE([$ext_srcdir])
@@ -51,7 +51,11 @@ if test "$PHP_CLICKHOUSE" != "no"; then
     CLICKHOUSE_OPENSSL_FLAGS=""
   ])
 
-  CLICKHOUSE_COMMON_FLAGS="-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 $CLICKHOUSE_OPENSSL_FLAGS"
+  dnl ext-clickhouse currently exposes Abseil-backed Int128/UInt128 values in
+  dnl its native conversion layer. Keep clickhouse-cpp in the matching mode
+  dnl until that API is migrated as a deliberate compatibility change.
+  CLICKHOUSE_BIGNUM_FLAGS="-DCH_USE_ABSEIL_FOR_BIGNUM=1"
+  CLICKHOUSE_COMMON_FLAGS="-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 $CLICKHOUSE_BIGNUM_FLAGS $CLICKHOUSE_OPENSSL_FLAGS"
 
   PHP_NEW_EXTENSION([clickhouse],
     [$PHP_CLICKHOUSE_SOURCES],
@@ -88,6 +92,7 @@ if test "$PHP_CLICKHOUSE" != "no"; then
     clickhouse-cpp/clickhouse/columns/uuid.cpp \
     clickhouse-cpp/clickhouse/columns/itemview.cpp \
     clickhouse-cpp/clickhouse/columns/json.cpp \
+    clickhouse-cpp/clickhouse/types/bignum.cpp \
     clickhouse-cpp/clickhouse/types/type_parser.cpp \
     clickhouse-cpp/clickhouse/types/types.cpp \
     clickhouse-cpp/clickhouse/block.cpp \
@@ -102,7 +107,7 @@ if test "$PHP_CLICKHOUSE" != "no"; then
 
   dnl clickhouse-cpp v2.6.2's exceptions.h uses std::shared_ptr without
   dnl including <memory>. Force-include it until the upstream fix is released.
-  CLICKHOUSE_CPP_CXX_FLAGS="$PHP_CLICKHOUSE_STDCXX -Wno-write-strings -include memory $CLICKHOUSE_OPENSSL_FLAGS"
+  CLICKHOUSE_CPP_CXX_FLAGS="$PHP_CLICKHOUSE_STDCXX -Wno-write-strings -include memory $CLICKHOUSE_BIGNUM_FLAGS $CLICKHOUSE_OPENSSL_FLAGS"
 
   AS_VAR_IF([ext_shared], [no],
     [PHP_ADD_SOURCES([$ext_dir],
@@ -195,11 +200,11 @@ if test "$PHP_CLICKHOUSE" != "no"; then
   PHP_INSTALL_HEADERS([ext/clickhouse/clickhouse-cpp/clickhouse],
     [block.h client.h error_codes.h exceptions.h protocol.h query.h server_exception.h version.h])
   PHP_INSTALL_HEADERS([ext/clickhouse/clickhouse-cpp/clickhouse/base],
-    [buffer.h compressed.h endpoints_iterator.h input.h open_telemetry.h output.h platform.h projected_iterator.h singleton.h socket.h sslsocket.h string_utils.h string_view.h uuid.h wire_format.h])
+    [bignum_string.h buffer.h compressed.h endpoints_iterator.h input.h open_telemetry.h output.h platform.h projected_iterator.h singleton.h socket.h sslsocket.h string_utils.h string_view.h uuid.h wire_format.h])
   PHP_INSTALL_HEADERS([ext/clickhouse/clickhouse-cpp/clickhouse/columns],
     [array.h bool.h column.h date.h decimal.h enum.h factory.h geo.h ip4.h ip6.h itemview.h json.h lowcardinality.h lowcardinalityadaptor.h map.h nothing.h nullable.h numeric.h string.h time.h tuple.h utils.h uuid.h])
   PHP_INSTALL_HEADERS([ext/clickhouse/clickhouse-cpp/clickhouse/types],
-    [type_parser.h types.h])
+    [bignum.h type_parser.h types.h])
   PHP_INSTALL_HEADERS([ext/clickhouse/clickhouse-cpp/contrib/absl/absl/base],
     [attributes.h config.h macros.h optimization.h options.h policy_checks.h port.h])
   PHP_INSTALL_HEADERS([ext/clickhouse/clickhouse-cpp/contrib/absl/absl/base/internal],
