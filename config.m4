@@ -51,11 +51,9 @@ if test "$PHP_CLICKHOUSE" != "no"; then
     CLICKHOUSE_OPENSSL_FLAGS=""
   ])
 
-  dnl ext-clickhouse currently exposes Abseil-backed Int128/UInt128 values in
-  dnl its native conversion layer. Keep clickhouse-cpp in the matching mode
-  dnl until that API is migrated as a deliberate compatibility change.
-  CLICKHOUSE_BIGNUM_FLAGS="-DCH_USE_ABSEIL_FOR_BIGNUM=1"
-  CLICKHOUSE_COMMON_FLAGS="-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 $CLICKHOUSE_BIGNUM_FLAGS $CLICKHOUSE_OPENSSL_FLAGS"
+  dnl Preserve the PHP type mapping and the C++ ABI shared with pdo_clickhouse.
+  CLICKHOUSE_API_FLAGS="-DCH_USE_ABSEIL_FOR_BIGNUM=1 -DCH_MAP_BOOL_TO_UINT8=0 -DCH_NON_OPTIONAL_CURRENT_ENDPOINT=0"
+  CLICKHOUSE_COMMON_FLAGS="-DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 $CLICKHOUSE_API_FLAGS $CLICKHOUSE_OPENSSL_FLAGS"
 
   PHP_NEW_EXTENSION([clickhouse],
     [$PHP_CLICKHOUSE_SOURCES],
@@ -107,7 +105,7 @@ if test "$PHP_CLICKHOUSE" != "no"; then
 
   dnl clickhouse-cpp v2.6.2's exceptions.h uses std::shared_ptr without
   dnl including <memory>. Force-include it until the upstream fix is released.
-  CLICKHOUSE_CPP_CXX_FLAGS="$PHP_CLICKHOUSE_STDCXX -Wno-write-strings -include memory $CLICKHOUSE_BIGNUM_FLAGS $CLICKHOUSE_OPENSSL_FLAGS"
+  CLICKHOUSE_CPP_CXX_FLAGS="$PHP_CLICKHOUSE_STDCXX -Wno-write-strings -include memory $CLICKHOUSE_API_FLAGS $CLICKHOUSE_OPENSSL_FLAGS"
 
   AS_VAR_IF([ext_shared], [no],
     [PHP_ADD_SOURCES([$ext_dir],

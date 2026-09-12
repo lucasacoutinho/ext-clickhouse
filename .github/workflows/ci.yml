@@ -51,7 +51,7 @@ jobs:
           ./configure --enable-clickhouse
           php_includes="$(php-config --includes)"
           common_args="-std=c++17 -DHAVE_CONFIG_H=1 -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 \
-            -DCH_USE_ABSEIL_FOR_BIGNUM=1 \
+            -DCH_USE_ABSEIL_FOR_BIGNUM=1 -DCH_MAP_BOOL_TO_UINT8=0 -DCH_NON_OPTIONAL_CURRENT_ENDPOINT=0 \
             -I. -Iclickhouse-cpp -Iclickhouse-cpp/contrib/absl \
             -Iclickhouse-cpp/clickhouse/cityhash -Iclickhouse-cpp/contrib/lz4/lz4 \
             -Iclickhouse-cpp/contrib/zstd/zstd $php_includes"
@@ -116,8 +116,9 @@ jobs:
           )
           if [ "${{ matrix.php-version }}" != "7.4" ] && [ "${{ matrix.php-version }}" != "8.0" ]; then
             asan_lib="$(cc -print-file-name=libasan.so)"
+            cxx_lib="$(c++ -print-file-name=libstdc++.so)"
             run_env+=(
-              LD_PRELOAD="$asan_lib"
+              LD_PRELOAD="$asan_lib:$cxx_lib"
               ASAN_OPTIONS="detect_leaks=0:abort_on_error=1"
             )
           fi
