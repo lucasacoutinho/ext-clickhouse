@@ -155,7 +155,7 @@ git submodule update --init --recursive
 Versioned and rolling images are published for each supported PHP release:
 
 ```bash
-docker pull ghcr.io/lucasacoutinho/ext-clickhouse:php8.5-v1.4.1
+docker pull ghcr.io/lucasacoutinho/ext-clickhouse:php8.5-v1.5.0
 docker pull ghcr.io/lucasacoutinho/ext-clickhouse:php8.5-latest
 ```
 
@@ -178,7 +178,7 @@ and reports malformed protocol packets as errors.
 
 The build explicitly preserves native Bool values, Abseil-backed wide integers,
 and the optional C++ endpoint API. Rebuild `ext-clickhouse-pdo` against this
-revision and use matching 1.4.x native extensions; the upstream C++ object
+revision and use matching 1.5.x native extensions; the upstream C++ object
 layouts changed.
 
 The submodule SHA is part of the extension source and release contract. New

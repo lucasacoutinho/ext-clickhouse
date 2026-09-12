@@ -66,7 +66,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php-version: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
+        include:
+          - php-version: '7.4'
+            sanitizer: ubsan
+          - php-version: '8.0'
+            sanitizer: ubsan
+          - php-version: '8.1'
+            sanitizer: asan
+          - php-version: '8.2'
+            sanitizer: asan
+          - php-version: '8.3'
+            sanitizer: asan
+          - php-version: '8.4'
+            sanitizer: asan
+          - php-version: '8.5'
+            sanitizer: asan
 
     steps:
       - name: Checkout
@@ -85,45 +99,59 @@ jobs:
           done
           git submodule update --init --force --depth=1 --recursive
 
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: ${{ matrix.php-version }}
-          tools: phpize
-          coverage: none
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
 
-      - name: Build and test with sanitizers
+      - name: Build sanitizer PHP and extension image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: tools/ci/Dockerfile.sanitizer
+          load: true
+          build-args: |
+            PHP_VERSION=${{ matrix.php-version }}
+            SANITIZER=${{ matrix.sanitizer }}
+          cache-from: type=gha,scope=ext-clickhouse-sanitizer-${{ matrix.php-version }}
+          cache-to: type=gha,mode=max,scope=ext-clickhouse-sanitizer-${{ matrix.php-version }}
+          tags: clickhouse-sanitizer:${{ matrix.php-version }}
+
+      - name: Run sanitizer tests
         run: |
-          phpize
-          if [ "${{ matrix.php-version }}" = "7.4" ] || [ "${{ matrix.php-version }}" = "8.0" ]; then
-            sanitizer_flags="-fsanitize=undefined -fno-omit-frame-pointer -O1 -g"
-            sanitizer_ldflags="-fsanitize=undefined"
-          else
-            sanitizer_flags="-fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g"
-            sanitizer_ldflags="-fsanitize=address,undefined"
-          fi
-          CFLAGS="$sanitizer_flags" \
-          CXXFLAGS="$sanitizer_flags" \
-          LDFLAGS="$sanitizer_ldflags" \
-            ./configure --enable-clickhouse
-          make clean || true
-          make -j"$(nproc)"
-          run_env=(
-            USE_ZEND_ALLOC=0
-            CLICKHOUSE_SANITIZER=1
-            UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
-            TEST_PHP_EXECUTABLE="$(command -v php)"
-          )
-          if [ "${{ matrix.php-version }}" != "7.4" ] && [ "${{ matrix.php-version }}" != "8.0" ]; then
-            asan_lib="$(cc -print-file-name=libasan.so)"
-            cxx_lib="$(c++ -print-file-name=libstdc++.so)"
-            run_env+=(
-              LD_PRELOAD="$asan_lib:$cxx_lib"
-              ASAN_OPTIONS="detect_leaks=0:abort_on_error=1"
-            )
-          fi
-          env "${run_env[@]}" timeout 180s php -n run-tests.php -n \
-            -d extension=modules/clickhouse.so --show-diff -q tests/0*.phpt
+          timeout 180s docker run --rm --network host \
+            "clickhouse-sanitizer:${{ matrix.php-version }}"
+
+  time64-386:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Checkout clickhouse-cpp
+        run: |
+          git submodule sync --recursive
+          for attempt in 1 2 3; do
+            if git submodule update --init --force --depth=1 --recursive; then
+              exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+          git submodule update --init --force --depth=1 --recursive
+
+      - name: Run current 32-bit Time64 proof
+        env:
+          TIME64_EVIDENCE_DIR: ${{ runner.temp }}/clickhouse-time64
+        run: tools/32bit-time64.sh
+
+      - name: Upload 32-bit Time64 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ext-clickhouse-time64-i386
+          path: ${{ runner.temp }}/clickhouse-time64
+          if-no-files-found: error
 
   coverage:
     runs-on: ubuntu-latest
