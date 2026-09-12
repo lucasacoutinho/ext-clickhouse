@@ -141,6 +141,8 @@ jobs:
           git submodule update --init --force --depth=1 --recursive
 
       - name: Run current 32-bit Time64 proof
+        env:
+          TIME64_EVIDENCE_DIR: ${{ runner.temp }}/clickhouse-time64
         run: tools/32bit-time64.sh
 
       - name: Upload 32-bit Time64 evidence
@@ -148,7 +150,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ext-clickhouse-time64-i386
-          path: ../evidence/time64-build-*
+          path: ${{ runner.temp }}/clickhouse-time64
           if-no-files-found: error
 
   coverage:

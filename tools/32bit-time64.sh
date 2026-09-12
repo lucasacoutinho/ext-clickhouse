@@ -3,10 +3,10 @@
 set -euo pipefail
 
 repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-evidence_root="$repo_root/../evidence"
+evidence_root="${TIME64_EVIDENCE_DIR:-$repo_root/../evidence}"
 mkdir -p "$evidence_root"
 evidence_root="$(CDPATH= cd -- "$evidence_root" && pwd)"
-run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+run_id="$(date -u +%Y%m%dt%H%M%Sz)-$$"
 run_root="$evidence_root/time64-build-$run_id"
 image="clickhouse-time64-${run_id}-current-386"
 tests_dir="$repo_root/tests"
