@@ -2,7 +2,11 @@ ARG PHP_VERSION=8.5
 
 FROM php:${PHP_VERSION}-cli AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN . /etc/os-release \
+    && if [ "$VERSION_CODENAME" = "bullseye" ]; then \
+        sed -i 's|deb http://deb.debian.org/debian-security|deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260831T000000Z/|g' /etc/apt/sources.list; \
+    fi \
+    && apt-get update && apt-get install -y --no-install-recommends \
     autoconf g++ make libssl-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
