@@ -155,7 +155,7 @@ git submodule update --init --recursive
 Versioned and rolling images are published for each supported PHP release:
 
 ```bash
-docker pull ghcr.io/lucasacoutinho/ext-clickhouse:php8.5-v1.3.0
+docker pull ghcr.io/lucasacoutinho/ext-clickhouse:php8.5-v1.4.0
 docker pull ghcr.io/lucasacoutinho/ext-clickhouse:php8.5-latest
 ```
 
@@ -171,10 +171,15 @@ The repository pins `clickhouse-cpp` as a git submodule and compiles it into
 `clickhouse.so`. Users do not install or link a separate system copy.
 `phpinfo()` reports the embedded client version.
 
-The v1.3 release line reports `clickhouse-cpp` v2.6.2 and uses upstream commit
-`737145d`. This reviewed post-tag snapshot retains the accepted `Query`
-overload and includes identifier escaping, client move support, and upstream
-CityHash and wide-integer build changes.
+The v1.4 release line reports `clickhouse-cpp` v2.6.2 and pins upstream commit
+`a63f50d97b7ae034ef0ac5a620ecfd785289f9b7`. This post-tag snapshot adds
+LowCardinality dictionary types, fixes nested SimpleAggregateFunction columns,
+and reports malformed protocol packets as errors.
+
+The build explicitly preserves native Bool values, Abseil-backed wide integers,
+and the optional C++ endpoint API. Rebuild `ext-clickhouse-pdo` against this
+revision and use matching 1.4.x native extensions; the upstream C++ object
+layouts changed.
 
 The submodule SHA is part of the extension source and release contract. New
 pins should prefer upstream tags. A post-tag pin must document the fixes it
