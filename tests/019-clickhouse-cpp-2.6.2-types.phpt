@@ -30,6 +30,28 @@ $time64 = Column::create('Time64(3)', [-1, 0, 1234567]);
 echo $time64->getTypeName() . ' ' . clickhouse_type_name($time64->getType()) . "\n";
 var_dump($time64->toArray());
 
+$wideTime64 = Column::create('Time64(3)', ['3000000000', '-3000000000']);
+$time64Values = $wideTime64->toArray();
+echo "Time64 wide values preserved: ";
+var_dump(
+    (string) $time64Values[0] === '3000000000'
+    && (string) $time64Values[1] === '-3000000000'
+    && gettype($time64Values[0]) === (PHP_INT_SIZE >= 8 ? 'integer' : 'string')
+    && gettype($time64Values[1]) === (PHP_INT_SIZE >= 8 ? 'integer' : 'string')
+);
+
+$lowCardinalityTime64 = Column::create(
+    'LowCardinality(Time64(3))',
+    ['3000000000', '-3000000000', '3000000000']
+);
+$lowCardinalityValues = $lowCardinalityTime64->toArray();
+echo "LowCardinality Time64 wide values preserved: ";
+var_dump(
+    array_map('strval', $lowCardinalityValues) === ['3000000000', '-3000000000', '3000000000']
+    && gettype($lowCardinalityValues[0]) === (PHP_INT_SIZE >= 8 ? 'integer' : 'string')
+    && gettype($lowCardinalityValues[1]) === (PHP_INT_SIZE >= 8 ? 'integer' : 'string')
+);
+
 foreach (
     [
         ['Bool', [2]],
@@ -83,6 +105,8 @@ array(3) {
   [2]=>
   int(1234567)
 }
+Time64 wide values preserved: bool(true)
+LowCardinality Time64 wide values preserved: bool(true)
 Bool rejected
 JSON rejected
 Time rejected

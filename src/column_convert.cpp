@@ -72,6 +72,17 @@ static void uint64_value_to_zval(uint64_t val, zval *rv)
     }
 }
 
+static void time64_value_to_zval(int64_t val, zval *rv)
+{
+    if (val >= static_cast<int64_t>(ZEND_LONG_MIN) && val <= static_cast<int64_t>(ZEND_LONG_MAX)) {
+        ZVAL_LONG(rv, static_cast<zend_long>(val));
+    } else {
+        char buf[32];
+        int len = snprintf(buf, sizeof(buf), "%" PRId64, val);
+        ZVAL_STRINGL(rv, buf, static_cast<size_t>(len));
+    }
+}
+
 template <typename T>
 static inline void numeric_to_zval_double(const ColumnRef &col, size_t index, zval *rv)
 {
@@ -143,7 +154,7 @@ static void time_to_zval(const ColumnRef &col, size_t index, zval *rv)
 static void time64_to_zval(const ColumnRef &col, size_t index, zval *rv)
 {
     auto typed = col->As<ColumnTime64>();
-    ZVAL_LONG(rv, static_cast<zend_long>(typed->At(index)));
+    time64_value_to_zval(typed->At(index), rv);
 }
 
 static void datetime64_value_to_zval(int64_t val, size_t precision, zval *rv)
@@ -485,7 +496,7 @@ static void lowcardinality_to_zval(const ColumnRef &col, size_t index, zval *rv)
         ZVAL_LONG(rv, static_cast<zend_long>(item.get<int32_t>()));
         break;
     case Type::Time64:
-        ZVAL_LONG(rv, static_cast<zend_long>(item.get<int64_t>()));
+        time64_value_to_zval(item.get<int64_t>(), rv);
         break;
     case Type::JSON: {
         auto sv = item.get<std::string_view>();
