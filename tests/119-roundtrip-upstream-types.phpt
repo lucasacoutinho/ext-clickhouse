@@ -20,7 +20,7 @@ $client->execute('CREATE TABLE _test_ext_upstream_types (
     ip LowCardinality(IPv4),
     optional LowCardinality(Nullable(Int32)),
     items SimpleAggregateFunction(groupArrayArray, Array(UInt64))
-) ENGINE = Memory SETTINGS allow_suspicious_low_cardinality_types = 1');
+) ENGINE = Memory', null, ['allow_suspicious_low_cardinality_types' => '1']);
 
 $block = new Block();
 $block->appendColumn('id', Column::create('UInt8', [1, 2, 3]));
