@@ -1,0 +1,90 @@
+# syntax=docker/dockerfile:1.7
+
+ARG PHP_VERSION=8.5
+
+FROM php:${PHP_VERSION}-cli AS php-builder
+
+ARG PHP_VERSION
+ARG SANITIZER=asan
+
+RUN . /etc/os-release \
+    && if [ "$VERSION_CODENAME" = "bullseye" ]; then \
+        sed -i 's|deb http://deb.debian.org/debian-security|deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260831T000000Z/|g' /etc/apt/sources.list; \
+    fi \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        autoconf bison ca-certificates g++ libssl-dev make pkg-config re2c \
+    && docker-php-source extract \
+    && cd /usr/src/php \
+    && if [ "$SANITIZER" = "ubsan" ]; then \
+        sanitizer_flags='-fsanitize=undefined -fno-omit-frame-pointer -O1 -g'; \
+        sanitizer_ldflags='-fsanitize=undefined'; \
+    else \
+        sanitizer_flags='-fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g'; \
+        sanitizer_ldflags='-fsanitize=address,undefined'; \
+    fi \
+    && php_extension_flags= \
+    && if [ "$PHP_VERSION" = "7.4" ]; then \
+        php_extension_flags='--enable-date --enable-json'; \
+    fi \
+    && CFLAGS="$sanitizer_flags" \
+       CXXFLAGS="$sanitizer_flags" \
+       LDFLAGS="$sanitizer_ldflags" \
+       ./configure \
+         --prefix=/opt/php \
+         --disable-all \
+         --disable-cgi \
+         --disable-phpdbg \
+         --enable-cli \
+         --enable-pcntl \
+         --enable-pdo \
+         --with-openssl $php_extension_flags \
+    && make -j"$(nproc)" \
+    && make install \
+    && /opt/php/bin/php -n -m
+
+FROM php-builder AS extension-builder
+
+ARG SANITIZER=asan
+
+WORKDIR /work/ext-clickhouse
+COPY . .
+
+RUN find . -type f \( -name '*.dep' -o -name '*.lai' -o -name '*.lo' \) -delete \
+    && /opt/php/bin/phpize \
+    && if [ "$SANITIZER" = "ubsan" ]; then \
+        sanitizer_flags='-fsanitize=undefined -fno-omit-frame-pointer -O1 -g'; \
+        sanitizer_ldflags='-fsanitize=undefined'; \
+    else \
+        sanitizer_flags='-fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g'; \
+        sanitizer_ldflags='-fsanitize=address,undefined'; \
+    fi \
+    && CFLAGS="$sanitizer_flags" \
+       CXXFLAGS="$sanitizer_flags" \
+       LDFLAGS="$sanitizer_ldflags" \
+       ./configure --with-php-config=/opt/php/bin/php-config --enable-clickhouse \
+    && make -j"$(nproc)" \
+    && test -s modules/clickhouse.so
+
+FROM php-builder AS sanitizer
+
+ARG SANITIZER=asan
+
+COPY --from=extension-builder /work/ext-clickhouse/modules/clickhouse.so /work/ext-clickhouse/modules/clickhouse.so
+COPY --from=extension-builder /work/ext-clickhouse/tests /work/ext-clickhouse/tests
+COPY --from=php-builder /usr/src/php/run-tests.php /work/run-tests.php
+COPY tools/ci/run-sanitizer-tests.sh /usr/local/bin/run-sanitizer-tests
+
+RUN chmod 0755 /usr/local/bin/run-sanitizer-tests \
+    && /opt/php/bin/php -n -m
+
+ENV PHP_BIN=/opt/php/bin/php \
+    SANITIZER_KIND=${SANITIZER} \
+    SANITIZER_TEST_SUITE=native \
+    SANITIZER_TEST_DIR=tests \
+    SANITIZER_TEST_PATTERN=0*.phpt \
+    SANITIZER_EXTENSION_PATHS=modules/clickhouse.so \
+    SANITIZER_REQUIRED_EXTENSIONS=date,json,pcntl,clickhouse
+
+WORKDIR /work/ext-clickhouse
+ENTRYPOINT ["/usr/local/bin/run-sanitizer-tests"]
