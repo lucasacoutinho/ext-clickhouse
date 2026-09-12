@@ -53,12 +53,13 @@ trap 'rm -f "$log_file" "$normalized_log"' EXIT
 set +e
 env \
     USE_ZEND_ALLOC=0 \
+    NO_COLOR=1 \
     CLICKHOUSE_SANITIZER=1 \
     TEST_PHP_EXECUTABLE="$PHP_BIN" \
     UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1" \
     ASAN_OPTIONS="detect_leaks=0:abort_on_error=1" \
     "$PHP_BIN" -n "$RUN_TESTS" -n $php_args \
-    --show-diff --no-color -q "$@" >"$log_file" 2>&1
+    --show-diff -q "$@" >"$log_file" 2>&1
 runner_status=$?
 set -e
 cat "$log_file"
