@@ -155,7 +155,7 @@ git submodule update --init --recursive
 Versioned and rolling images are published for each supported PHP release:
 
 ```bash
-docker pull ghcr.io/lucasacoutinho/ext-clickhouse:php8.5-v1.6.0
+docker pull ghcr.io/lucasacoutinho/ext-clickhouse:php8.5-v1.6.1
 docker pull ghcr.io/lucasacoutinho/ext-clickhouse:php8.5-latest
 ```
 
@@ -171,11 +171,14 @@ The repository pins `clickhouse-cpp` as a git submodule and compiles it into
 `clickhouse.so`. Users do not install or link a separate system copy.
 `phpinfo()` reports the embedded client version.
 
-The v1.6 release line reports `clickhouse-cpp` v2.6.2 and pins upstream commit
-`fc5d98f6685dcc075aa18aa03ab19a9447b4c09a`. This post-tag snapshot preserves
+The v1.6.1 release reports `clickhouse-cpp` v2.6.2 and pins upstream commit
+`cdc6dfc2980826560bfdbd06e937c7a01a495209`. This post-tag snapshot preserves
 DateTime timezone metadata, validates array element types and compressed block
 sizes, flushes the handshake addendum before the first query, and reports
-premature socket EOF as a protocol error.
+premature socket EOF as a protocol error. It also rejects unbalanced and
+overly nested type names, reads the ProfileInfo flags as bytes, zeroes
+ServerInfo fields missing from a server Hello, and names the CA file or
+directory when loading it fails.
 
 The build explicitly preserves native Bool values, Abseil-backed wide integers,
 and the optional C++ endpoint API. Rebuild `ext-clickhouse-pdo` against this
