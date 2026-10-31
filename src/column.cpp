@@ -51,6 +51,8 @@ ZEND_METHOD(ClickHouse_Driver_Column, create)
 
     /* Populate from PHP array */
     HashTable *ht = Z_ARRVAL_P(values);
+    col->Reserve(zend_hash_num_elements(ht));
+
     zval *entry;
     ZEND_HASH_FOREACH_VAL(ht, entry)
     {

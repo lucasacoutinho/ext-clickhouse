@@ -406,14 +406,15 @@ template <typename T> static bool zval_to_integral(zval *value, T &out)
     }
 }
 
+/* php_clickhouse_zval_to_column has matched the type code, so the leaf writers downcast directly.
+ * As<T>() costs a dynamic cast and two atomic refcounts per value. */
+template <typename T> static inline T *leaf_column(const ColumnRef &col)
+{
+    return static_cast<T *>(col.get());
+}
+
 template <typename T> static void write_numeric(ColumnRef &col, zval *value)
 {
-    auto typed = col->As<ColumnVector<T>>();
-    if (!typed) {
-        zend_throw_exception(clickhouse_ce_ValidationException, "Column type mismatch", 0);
-        return;
-    }
-
     T parsed;
     if (!zval_to_integral<T>(value, parsed)) {
         zend_throw_exception_ex(clickhouse_ce_ValidationException, 0,
@@ -422,25 +423,19 @@ template <typename T> static void write_numeric(ColumnRef &col, zval *value)
         return;
     }
 
-    typed->Append(parsed);
+    leaf_column<ColumnVector<T>>(col)->Append(parsed);
 }
 
 template <typename T> static void write_float(ColumnRef &col, zval *value)
 {
-    auto typed = col->As<ColumnVector<T>>();
-    if (!typed) {
-        zend_throw_exception(clickhouse_ce_ValidationException, "Column type mismatch", 0);
-        return;
-    }
-    double dval = zval_get_double(value);
-    typed->Append(static_cast<T>(dval));
+    leaf_column<ColumnVector<T>>(col)->Append(static_cast<T>(zval_get_double(value)));
 }
 
 static void write_string(ColumnRef &col, zval *value)
 {
-    auto typed = col->As<ColumnString>();
-    if (!typed) {
-        zend_throw_exception(clickhouse_ce_ValidationException, "Column type mismatch", 0);
+    auto *typed = leaf_column<ColumnString>(col);
+    if (Z_TYPE_P(value) == IS_STRING) {
+        typed->Append(std::string_view(Z_STRVAL_P(value), Z_STRLEN_P(value)));
         return;
     }
     zend_string *str = zval_get_string(value);
@@ -1568,7 +1563,7 @@ static void write_multipolygon(ColumnRef &col, zval *value)
 
 void php_clickhouse_zval_to_column(ColumnRef &col, zval *value)
 {
-    switch (col->Type()->GetCode()) {
+    switch (col->GetType().GetCode()) {
     case Type::Int8:
         write_numeric<int8_t>(col, value);
         break;
