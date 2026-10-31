@@ -30,4 +30,7 @@ void php_clickhouse_register_block(int module_number);
 /* Create a PHP Block object from a C++ Block (copies column refs) */
 void php_clickhouse_create_block_from_cpp(zval *return_value, const clickhouse::Block &cpp_block);
 
+/* Append every row of a block to a PHP list as associative arrays */
+void php_clickhouse_block_append_rows(const clickhouse::Block &block, zval *rows_out);
+
 #endif

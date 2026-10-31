@@ -162,25 +162,7 @@ ZEND_METHOD(ClickHouse_Driver_Client, select)
     CLICKHOUSE_TRY
     auto q = build_query(query, params, settings, query_id);
     q.OnData([&](const clickhouse::Block &block) {
-        size_t rows = block.GetRowCount();
-        size_t cols = block.GetColumnCount();
-
-        if (rows == 0)
-            return;
-
-        for (size_t r = 0; r < rows; ++r) {
-            zval row;
-            array_init_size(&row, cols);
-
-            for (size_t c = 0; c < cols; ++c) {
-                zval val;
-                php_clickhouse_column_to_zval(block[c], r, &val);
-                add_assoc_zval_ex(&row, block.GetColumnName(c).c_str(),
-                                  block.GetColumnName(c).size(), &val);
-            }
-
-            add_next_index_zval(return_value, &row);
-        }
+        php_clickhouse_block_append_rows(block, return_value);
     });
     intern->client->Execute(q);
     CLICKHOUSE_CATCH_RETURN

@@ -3,6 +3,13 @@
 #include "src/column_convert.h"
 #include "src/common.h"
 #include "clickhouse_arginfo.h"
+#include "clickhouse/columns/numeric.h"
+#include "clickhouse/columns/string.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <string_view>
+#include <vector>
 
 zend_class_entry *clickhouse_ce_Block = nullptr;
 static zend_object_handlers clickhouse_block_handlers;
@@ -187,23 +194,175 @@ ZEND_METHOD(ClickHouse_Driver_Block, toArray)
         return;
     }
 
-    size_t rows = intern->block->GetRowCount();
-    size_t cols = intern->block->GetColumnCount();
+    array_init_size(return_value, intern->block->GetRowCount());
 
-    array_init_size(return_value, rows);
+    php_clickhouse_block_append_rows(*intern->block, return_value);
+}
 
-    for (size_t r = 0; r < rows; ++r) {
-        zval row;
-        array_init_size(&row, cols);
+namespace {
 
-        for (size_t c = 0; c < cols; ++c) {
-            zval val;
-            php_clickhouse_column_to_zval((*intern->block)[c], r, &val);
-            add_assoc_zval_ex(&row, intern->block->GetColumnName(c).c_str(),
-                              intern->block->GetColumnName(c).size(), &val);
+/* A row with the result keys and null values. Duplicating it skips hashing every key per row. */
+class RowTemplate
+{
+  public:
+    explicit RowTemplate(const clickhouse::Block &block)
+        : row_(zend_new_array(block.GetColumnCount())), slots_(block.GetColumnCount())
+    {
+        zend_hash_real_init_mixed(row_);
+
+        zval null_value;
+        ZVAL_NULL(&null_value);
+
+        for (size_t c = 0; c < slots_.size(); ++c) {
+            const std::string &name = block.GetColumnName(c);
+            zend_string *key = zend_string_init(name.data(), name.size(), 0);
+            const zval *slot = zend_symtable_update(row_, key, &null_value);
+            zend_string_release(key);
+            slots_[c] =
+                static_cast<uint32_t>(reinterpret_cast<const Bucket *>(slot) - row_->arData);
         }
+    }
 
-        add_next_index_zval(return_value, &row);
+    ~RowTemplate()
+    {
+        zend_array_destroy(row_);
+    }
+
+    RowTemplate(const RowTemplate &) = delete;
+    RowTemplate &operator=(const RowTemplate &) = delete;
+
+    zend_array *NewRow() const
+    {
+        return zend_array_dup(row_);
+    }
+
+    uint32_t Slot(size_t c) const
+    {
+        return slots_[c];
+    }
+
+    /* With duplicate names the last column wins, and each slot must be written only once. */
+    bool OwnsSlot(size_t c) const
+    {
+        return std::find(slots_.begin() + static_cast<std::ptrdiff_t>(c) + 1, slots_.end(),
+                         slots_[c]) == slots_.end();
+    }
+
+  private:
+    zend_array *row_;
+    std::vector<uint32_t> slots_;
+};
+
+using RowList = std::vector<zend_array *>;
+
+template <typename Write> inline void fill_slots(const RowList &rows, uint32_t slot, Write write)
+{
+    for (size_t r = 0; r < rows.size(); ++r) {
+        write(r, &rows[r]->arData[slot].val);
+    }
+}
+
+template <typename T> inline const T *numeric_data(const clickhouse::ColumnRef &column)
+{
+    return static_cast<clickhouse::ColumnVector<T> *>(column.get())->GetWritableData().data();
+}
+
+template <typename T>
+inline void fill_long(const clickhouse::ColumnRef &column, const RowList &rows, uint32_t slot)
+{
+    const T *data = numeric_data<T>(column);
+    fill_slots(rows, slot,
+               [data](size_t r, zval *out) { ZVAL_LONG(out, static_cast<zend_long>(data[r])); });
+}
+
+template <typename T>
+inline void fill_double(const clickhouse::ColumnRef &column, const RowList &rows, uint32_t slot)
+{
+    const T *data = numeric_data<T>(column);
+    fill_slots(rows, slot,
+               [data](size_t r, zval *out) { ZVAL_DOUBLE(out, static_cast<double>(data[r])); });
+}
+
+inline void fill_uint64(const clickhouse::ColumnRef &column, const RowList &rows, uint32_t slot)
+{
+    const uint64_t *data = numeric_data<uint64_t>(column);
+    fill_slots(rows, slot, [&column, data](size_t r, zval *out) {
+        if (EXPECTED(data[r] <= static_cast<uint64_t>(ZEND_LONG_MAX))) {
+            ZVAL_LONG(out, static_cast<zend_long>(data[r]));
+        } else {
+            php_clickhouse_column_to_zval(column, r, out);
+        }
+    });
+}
+
+/* Resolve the type once per block. Types without a loop here convert one cell at a time. */
+void fill_column(const clickhouse::ColumnRef &column, const RowList &rows, uint32_t slot)
+{
+    using clickhouse::Type;
+
+    switch (column->GetType().GetCode()) {
+    case Type::Int8:
+        return fill_long<int8_t>(column, rows, slot);
+    case Type::Int16:
+        return fill_long<int16_t>(column, rows, slot);
+    case Type::Int32:
+        return fill_long<int32_t>(column, rows, slot);
+    case Type::Int64:
+        return fill_long<int64_t>(column, rows, slot);
+    case Type::UInt8:
+        return fill_long<uint8_t>(column, rows, slot);
+    case Type::UInt16:
+        return fill_long<uint16_t>(column, rows, slot);
+    case Type::UInt32:
+        return fill_long<uint32_t>(column, rows, slot);
+    case Type::UInt64:
+        return fill_uint64(column, rows, slot);
+    case Type::Float32:
+        return fill_double<float>(column, rows, slot);
+    case Type::Float64:
+        return fill_double<double>(column, rows, slot);
+    case Type::String: {
+        const auto *strings = static_cast<const clickhouse::ColumnString *>(column.get());
+        return fill_slots(rows, slot, [strings](size_t r, zval *out) {
+            const std::string_view value = strings->At(r);
+            ZVAL_STRINGL(out, value.data(), value.size());
+        });
+    }
+    default:
+        return fill_slots(rows, slot, [&column](size_t r, zval *out) {
+            php_clickhouse_column_to_zval(column, r, out);
+        });
+    }
+}
+
+} // namespace
+
+void php_clickhouse_block_append_rows(const clickhouse::Block &block, zval *rows_out)
+{
+    const size_t row_count = block.GetRowCount();
+
+    if (row_count == 0) {
+        return;
+    }
+
+    HashTable *result = Z_ARRVAL_P(rows_out);
+    zend_hash_extend(result, zend_hash_num_elements(result) + row_count, 1);
+
+    const RowTemplate row_template(block);
+
+    /* Rows join the result before they are filled, so a conversion failure cannot leak them. */
+    RowList rows(row_count);
+    for (size_t r = 0; r < row_count; ++r) {
+        rows[r] = row_template.NewRow();
+        zval row;
+        ZVAL_ARR(&row, rows[r]);
+        zend_hash_next_index_insert_new(result, &row);
+    }
+
+    for (size_t c = 0; c < block.GetColumnCount(); ++c) {
+        if (row_template.OwnsSlot(c)) {
+            fill_column(block[c], rows, row_template.Slot(c));
+        }
     }
 }
 
