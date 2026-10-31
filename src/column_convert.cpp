@@ -41,8 +41,7 @@ static void decimal_value_to_zval(Int128 raw, size_t scale, zval *rv);
 
 /* The dispatch in php_clickhouse_column_to_zval has already matched the type code, so the hot
  * paths downcast directly. As<T>() costs a dynamic cast and two atomic refcounts per cell. */
-template <typename T>
-static inline const T *typed_column(const ColumnRef &col)
+template <typename T> static inline const T *typed_column(const ColumnRef &col)
 {
     return static_cast<const T *>(col.get());
 }

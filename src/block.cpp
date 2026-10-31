@@ -197,8 +197,9 @@ ZEND_METHOD(ClickHouse_Driver_Block, toArray)
 namespace {
 
 /* One prehashed key per column, so a row costs a reference instead of a key allocation. */
-class RowKeys {
-public:
+class RowKeys
+{
+  public:
     explicit RowKeys(const clickhouse::Block &block)
     {
         keys_.reserve(block.GetColumnCount());
@@ -220,9 +221,12 @@ public:
     RowKeys(const RowKeys &) = delete;
     RowKeys &operator=(const RowKeys &) = delete;
 
-    zend_string *operator[](size_t c) const { return keys_[c]; }
+    zend_string *operator[](size_t c) const
+    {
+        return keys_[c];
+    }
 
-private:
+  private:
     std::vector<zend_string *> keys_;
 };
 
