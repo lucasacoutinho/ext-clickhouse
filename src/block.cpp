@@ -4,6 +4,8 @@
 #include "src/common.h"
 #include "clickhouse_arginfo.h"
 
+#include <vector>
+
 zend_class_entry *clickhouse_ce_Block = nullptr;
 static zend_object_handlers clickhouse_block_handlers;
 
@@ -187,10 +189,63 @@ ZEND_METHOD(ClickHouse_Driver_Block, toArray)
         return;
     }
 
-    size_t rows = intern->block->GetRowCount();
-    size_t cols = intern->block->GetColumnCount();
+    array_init_size(return_value, intern->block->GetRowCount());
 
-    array_init_size(return_value, rows);
+    php_clickhouse_block_append_rows(*intern->block, return_value);
+}
+
+namespace {
+
+/* One prehashed key per column, so a row costs a reference instead of a key allocation. */
+class RowKeys {
+public:
+    explicit RowKeys(const clickhouse::Block &block)
+    {
+        keys_.reserve(block.GetColumnCount());
+        for (size_t c = 0; c < block.GetColumnCount(); ++c) {
+            const std::string &name = block.GetColumnName(c);
+            zend_string *key = zend_string_init(name.data(), name.size(), 0);
+            zend_string_hash_val(key);
+            keys_.push_back(key);
+        }
+    }
+
+    ~RowKeys()
+    {
+        for (zend_string *key : keys_) {
+            zend_string_release(key);
+        }
+    }
+
+    RowKeys(const RowKeys &) = delete;
+    RowKeys &operator=(const RowKeys &) = delete;
+
+    zend_string *operator[](size_t c) const { return keys_[c]; }
+
+private:
+    std::vector<zend_string *> keys_;
+};
+
+} // namespace
+
+void php_clickhouse_block_append_rows(const clickhouse::Block &block, zval *rows_out)
+{
+    const size_t rows = block.GetRowCount();
+    const size_t cols = block.GetColumnCount();
+
+    if (rows == 0) {
+        return;
+    }
+
+    HashTable *result = Z_ARRVAL_P(rows_out);
+    zend_hash_extend(result, zend_hash_num_elements(result) + rows, 1);
+
+    const RowKeys keys(block);
+    std::vector<clickhouse::ColumnRef> columns;
+    columns.reserve(cols);
+    for (size_t c = 0; c < cols; ++c) {
+        columns.push_back(block[c]);
+    }
 
     for (size_t r = 0; r < rows; ++r) {
         zval row;
@@ -198,12 +253,11 @@ ZEND_METHOD(ClickHouse_Driver_Block, toArray)
 
         for (size_t c = 0; c < cols; ++c) {
             zval val;
-            php_clickhouse_column_to_zval((*intern->block)[c], r, &val);
-            add_assoc_zval_ex(&row, intern->block->GetColumnName(c).c_str(),
-                              intern->block->GetColumnName(c).size(), &val);
+            php_clickhouse_column_to_zval(columns[c], r, &val);
+            zend_symtable_update(Z_ARRVAL(row), keys[c], &val);
         }
 
-        add_next_index_zval(return_value, &row);
+        zend_hash_next_index_insert_new(result, &row);
     }
 }
 

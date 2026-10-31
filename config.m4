@@ -32,6 +32,7 @@ if test "$PHP_CLICKHOUSE" != "no"; then
   PHP_CLICKHOUSE_SOURCES="php_clickhouse.cpp \
     contrib_absl_int128.cpp \
     contrib_cityhash.cpp \
+    contrib_getaddrinfo.cpp \
     src/exceptions.cpp \
     src/client_options.cpp \
     src/client.cpp \
@@ -105,7 +106,8 @@ if test "$PHP_CLICKHOUSE" != "no"; then
 
   dnl clickhouse-cpp v2.6.2's exceptions.h uses std::shared_ptr without
   dnl including <memory>. Force-include it until the upstream fix is released.
-  CLICKHOUSE_CPP_CXX_FLAGS="$PHP_CLICKHOUSE_STDCXX -Wno-write-strings -include memory $CLICKHOUSE_API_FLAGS $CLICKHOUSE_OPENSSL_FLAGS"
+  dnl Route the client resolver through contrib_getaddrinfo.cpp to drop AI_ADDRCONFIG.
+  CLICKHOUSE_CPP_CXX_FLAGS="$PHP_CLICKHOUSE_STDCXX -Wno-write-strings -include memory -Dgetaddrinfo=php_clickhouse_getaddrinfo $CLICKHOUSE_API_FLAGS $CLICKHOUSE_OPENSSL_FLAGS"
 
   AS_VAR_IF([ext_shared], [no],
     [PHP_ADD_SOURCES([$ext_dir],

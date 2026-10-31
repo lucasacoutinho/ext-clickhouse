@@ -39,17 +39,23 @@ static void datetime64_value_to_zval(int64_t val, size_t precision, zval *rv);
 static void uuid_parts_to_zval(uint64_t hi, uint64_t lo, zval *rv);
 static void decimal_value_to_zval(Int128 raw, size_t scale, zval *rv);
 
+/* The dispatch in php_clickhouse_column_to_zval has already matched the type code, so the hot
+ * paths downcast directly. As<T>() costs a dynamic cast and two atomic refcounts per cell. */
+template <typename T>
+static inline const T *typed_column(const ColumnRef &col)
+{
+    return static_cast<const T *>(col.get());
+}
+
 template <typename T>
 static inline void numeric_to_zval_long(const ColumnRef &col, size_t index, zval *rv)
 {
-    auto typed = col->As<ColumnVector<T>>();
-    ZVAL_LONG(rv, static_cast<zend_long>(typed->At(index)));
+    ZVAL_LONG(rv, static_cast<zend_long>(typed_column<ColumnVector<T>>(col)->At(index)));
 }
 
 static void uint64_to_zval(const ColumnRef &col, size_t index, zval *rv)
 {
-    auto typed = col->As<ColumnVector<uint64_t>>();
-    uint64_t val = typed->At(index);
+    uint64_t val = typed_column<ColumnVector<uint64_t>>(col)->At(index);
     if (val <= static_cast<uint64_t>(ZEND_LONG_MAX)) {
         ZVAL_LONG(rv, static_cast<zend_long>(val));
     } else {
@@ -86,20 +92,17 @@ static void time64_value_to_zval(int64_t val, zval *rv)
 template <typename T>
 static inline void numeric_to_zval_double(const ColumnRef &col, size_t index, zval *rv)
 {
-    auto typed = col->As<ColumnVector<T>>();
-    ZVAL_DOUBLE(rv, static_cast<double>(typed->At(index)));
+    ZVAL_DOUBLE(rv, static_cast<double>(typed_column<ColumnVector<T>>(col)->At(index)));
 }
 
 static void bool_to_zval(const ColumnRef &col, size_t index, zval *rv)
 {
-    auto typed = col->As<ColumnBool>();
-    ZVAL_BOOL(rv, typed->At(index));
+    ZVAL_BOOL(rv, typed_column<ColumnBool>(col)->At(index));
 }
 
 static void string_to_zval(const ColumnRef &col, size_t index, zval *rv)
 {
-    auto typed = col->As<ColumnString>();
-    std::string_view sv = typed->At(index);
+    std::string_view sv = typed_column<ColumnString>(col)->At(index);
     ZVAL_STRINGL(rv, sv.data(), sv.size());
 }
 
@@ -112,8 +115,7 @@ static void json_to_zval(const ColumnRef &col, size_t index, zval *rv)
 
 static void fixed_string_to_zval(const ColumnRef &col, size_t index, zval *rv)
 {
-    auto typed = col->As<ColumnFixedString>();
-    std::string_view sv = typed->At(index);
+    std::string_view sv = typed_column<ColumnFixedString>(col)->At(index);
     ZVAL_STRINGL(rv, sv.data(), sv.size());
 }
 
@@ -676,7 +678,7 @@ static void multipolygon_to_zval(const ColumnRef &col, size_t index, zval *rv)
 
 void php_clickhouse_column_to_zval(const ColumnRef &col, size_t index, zval *return_value)
 {
-    switch (col->Type()->GetCode()) {
+    switch (col->GetType().GetCode()) {
     case Type::Int8:
         numeric_to_zval_long<int8_t>(col, index, return_value);
         break;
