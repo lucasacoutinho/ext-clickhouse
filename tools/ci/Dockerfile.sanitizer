@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
 ARG PHP_VERSION=8.5
+ARG PHP_IMAGE=php:${PHP_VERSION}-cli
 
-FROM php:${PHP_VERSION}-cli AS php-builder
+FROM ${PHP_IMAGE} AS php-builder
 
 ARG PHP_VERSION
 ARG SANITIZER=asan

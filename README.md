@@ -7,7 +7,7 @@
   <p>
     <a href="https://github.com/lucasacoutinho/ext-clickhouse/actions/workflows/ci.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/lucasacoutinho/ext-clickhouse/ci.yml?branch=main&style=for-the-badge&labelColor=000000"></a>
     <a href="https://packagist.org/packages/lucasacoutinho/ext-clickhouse"><img alt="Packagist version" src="https://img.shields.io/packagist/v/lucasacoutinho/ext-clickhouse?style=for-the-badge&labelColor=000000"></a>
-    <a href="#requirements"><img alt="PHP 7.4 through 8.5" src="https://img.shields.io/badge/PHP-7.4%20to%208.5-777BB4?style=for-the-badge&logo=php&logoColor=white&labelColor=000000"></a>
+    <a href="#requirements"><img alt="PHP 7.4 through 8.6" src="https://img.shields.io/badge/PHP-7.4%20to%208.6-777BB4?style=for-the-badge&logo=php&logoColor=white&labelColor=000000"></a>
     <a href="https://github.com/lucasacoutinho/ext-clickhouse/blob/main/LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/lucasacoutinho/ext-clickhouse?style=for-the-badge&labelColor=000000"></a>
   </p>
 </div>
@@ -53,7 +53,7 @@ block-by-block result streaming without an HTTP or cURL transport.
 
 | Component | Supported version |
 | --- | --- |
-| PHP | 7.4 through 8.5 |
+| PHP | 7.4 through 8.6 |
 | Compiler for source builds | GCC 8+, Clang 7+, or another C++17 compiler |
 | ClickHouse C++ client | Bundled with the extension |
 

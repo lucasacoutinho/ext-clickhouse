@@ -81,6 +81,10 @@ jobs:
             sanitizer: asan
           - php-version: '8.5'
             sanitizer: asan
+          # Official php:8.6-cli is unpublished until GA (2026-11-19); 8.6-rc-cli tracks the RC.
+          - php-version: '8.6'
+            php-image: 'php:8.6-rc-cli'
+            sanitizer: asan
 
     steps:
       - name: Checkout
@@ -110,6 +114,7 @@ jobs:
           load: true
           build-args: |
             PHP_VERSION=${{ matrix.php-version }}
+            PHP_IMAGE=${{ matrix.php-image || format('php:{0}-cli', matrix.php-version) }}
             SANITIZER=${{ matrix.sanitizer }}
           cache-from: type=gha,scope=ext-clickhouse-sanitizer-${{ matrix.php-version }}
           cache-to: type=gha,mode=max,scope=ext-clickhouse-sanitizer-${{ matrix.php-version }}
@@ -158,7 +163,11 @@ jobs:
 
     services:
       clickhouse:
-        image: clickhouse/clickhouse-server:24
+        image: clickhouse/clickhouse-server:26.10
+        env:
+          # 26.x images confine user default to localhost unless this is set.
+          # The stock users.xml still allows an empty password from any address.
+          CLICKHOUSE_SKIP_USER_SETUP: "1"
         ports:
           - 9000:9000
         options: >-
@@ -244,11 +253,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php-version: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
+        php-version: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5', '8.6']
+        clickhouse-version: ['26.3', '26.8', '26.10']
 
     services:
       clickhouse:
-        image: clickhouse/clickhouse-server:24
+        image: clickhouse/clickhouse-server:${{ matrix.clickhouse-version }}
+        env:
+          # 26.x images confine user default to localhost unless this is set.
+          # The stock users.xml still allows an empty password from any address.
+          CLICKHOUSE_SKIP_USER_SETUP: "1"
         ports:
           - 9000:9000
         options: >-

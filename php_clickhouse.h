@@ -14,6 +14,11 @@ extern "C" {
 #endif
 }
 
+/* PHP 8.6 dropped XtOffsetOf. Through 8.5 it is an alias of offsetof. */
+#ifndef XtOffsetOf
+#define XtOffsetOf(type, member) offsetof(type, member)
+#endif
+
 #define PHP_CLICKHOUSE_VERSION "1.6.2"
 #define PHP_CLICKHOUSE_EXTNAME "clickhouse"
 
