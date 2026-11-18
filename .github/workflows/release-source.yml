@@ -5,16 +5,37 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read # checkout the repository; the package job widens this
 
 jobs:
   package-source:
     runs-on: ubuntu-latest
+    permissions:
+      actions: read # confirm CI succeeded for the tagged commit
+      contents: write # publish the source package to the GitHub release
 
     steps:
+      - name: Verify tag commit is on main and CI passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ahead="$(gh api --jq '.ahead_by' "repos/${GITHUB_REPOSITORY}/compare/main...${GITHUB_SHA}")"
+          if [ "$ahead" != "0" ]; then
+            echo "::error::${GITHUB_REF_NAME} (${GITHUB_SHA}) is not contained in main"
+            exit 1
+          fi
+          success="$(gh run list --commit "$GITHUB_SHA" --workflow ci.yml --limit 50 \
+            --json conclusion --jq '[.[] | select(.conclusion == "success")] | length')"
+          if [ "$success" -lt 1 ]; then
+            echo "::error::CI workflow has not succeeded for ${GITHUB_SHA}"
+            exit 1
+          fi
+
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           submodules: false
 
       - name: Checkout clickhouse-cpp
@@ -55,6 +76,6 @@ jobs:
           tar -C "$RUNNER_TEMP" -czf "dist/php_clickhouse-$version-src.tgz" "$package_dir"
 
       - name: Upload source package
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           files: dist/php_clickhouse-*-src.tgz
