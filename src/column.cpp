@@ -151,6 +151,10 @@ ZEND_METHOD(ClickHouse_Driver_Column, toArray)
     for (size_t i = 0; i < n; ++i) {
         zval val;
         php_clickhouse_column_to_zval(intern->column, i, &val);
+        if (EG(exception)) {
+            zval_ptr_dtor(&val);
+            return;
+        }
         add_next_index_zval(return_value, &val);
     }
 }

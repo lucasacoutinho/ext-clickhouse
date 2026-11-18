@@ -25,6 +25,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <cinttypes>
 #include <limits>
 #include <sstream>
@@ -118,13 +119,36 @@ static void fixed_string_to_zval(const ColumnRef &col, size_t index, zval *rv)
     ZVAL_STRINGL(rv, sv.data(), sv.size());
 }
 
+static void unrepresentable_datetime(zval *rv)
+{
+    ZVAL_NULL(rv);
+    if (!EG(exception)) {
+        zend_throw_exception(clickhouse_ce_ClickHouseException,
+                             "DateTime value is outside the representable range", 0);
+    }
+}
+
+/* gmtime_r leaves tm untouched and returns NULL when the timestamp does not fit in struct tm. */
+static bool utc_tm_from_unix(int64_t seconds, struct tm *tm_buf)
+{
+    if (seconds < static_cast<int64_t>(std::numeric_limits<time_t>::min()) ||
+        seconds > static_cast<int64_t>(std::numeric_limits<time_t>::max())) {
+        return false;
+    }
+
+    time_t unix_time = static_cast<time_t>(seconds);
+    return gmtime_r(&unix_time, tm_buf) != nullptr;
+}
+
 static void date_to_zval(const ColumnRef &col, size_t index, zval *rv)
 {
     /* ColumnDate stores days since epoch as uint16_t; convert to 'Y-m-d' */
     auto typed = col->As<ColumnDate>();
-    std::time_t t = typed->At(index);
     struct tm tm_buf;
-    gmtime_r(&t, &tm_buf);
+    if (!utc_tm_from_unix(static_cast<int64_t>(typed->At(index)), &tm_buf)) {
+        unrepresentable_datetime(rv);
+        return;
+    }
     char buf[16];
     int len = snprintf(buf, sizeof(buf), "%04d-%02d-%02d", tm_buf.tm_year + 1900, tm_buf.tm_mon + 1,
                        tm_buf.tm_mday);
@@ -173,8 +197,10 @@ static void datetime64_value_to_zval(int64_t val, size_t precision, zval *rv)
     }
 
     struct tm tm_buf;
-    time_t t = static_cast<time_t>(seconds);
-    gmtime_r(&t, &tm_buf);
+    if (!utc_tm_from_unix(seconds, &tm_buf)) {
+        unrepresentable_datetime(rv);
+        return;
+    }
 
     char buf[64];
     int len = snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d.%0*" PRId64,
@@ -186,9 +212,11 @@ static void datetime64_value_to_zval(int64_t val, size_t precision, zval *rv)
 static void date32_to_zval(const ColumnRef &col, size_t index, zval *rv)
 {
     auto typed = col->As<ColumnDate32>();
-    std::time_t t = typed->At(index);
     struct tm tm_buf;
-    gmtime_r(&t, &tm_buf);
+    if (!utc_tm_from_unix(static_cast<int64_t>(typed->At(index)), &tm_buf)) {
+        unrepresentable_datetime(rv);
+        return;
+    }
     char buf[16];
     int len = snprintf(buf, sizeof(buf), "%04d-%02d-%02d", tm_buf.tm_year + 1900, tm_buf.tm_mon + 1,
                        tm_buf.tm_mday);
@@ -215,6 +243,10 @@ static void array_to_zval(const ColumnRef &col, size_t index, zval *rv)
     for (size_t i = 0; i < n; ++i) {
         zval elem;
         php_clickhouse_column_to_zval(slice, i, &elem);
+        if (EG(exception)) {
+            zval_ptr_dtor(&elem);
+            return;
+        }
         add_next_index_zval(rv, &elem);
     }
 }
@@ -228,6 +260,10 @@ static void tuple_to_zval(const ColumnRef &col, size_t index, zval *rv)
     for (size_t i = 0; i < n; ++i) {
         zval elem;
         php_clickhouse_column_to_zval((*typed)[i], index, &elem);
+        if (EG(exception)) {
+            zval_ptr_dtor(&elem);
+            return;
+        }
         add_next_index_zval(rv, &elem);
     }
 }
@@ -248,7 +284,16 @@ static void map_to_zval(const ColumnRef &col, size_t index, zval *rv)
         for (size_t i = 0; i < tuple_col->Size(); ++i) {
             zval key, val;
             php_clickhouse_column_to_zval(k_col, i, &key);
+            if (EG(exception)) {
+                zval_ptr_dtor(&key);
+                return;
+            }
             php_clickhouse_column_to_zval(v_col, i, &val);
+            if (EG(exception)) {
+                zval_ptr_dtor(&key);
+                zval_ptr_dtor(&val);
+                return;
+            }
 
             if (Z_TYPE(key) == IS_STRING) {
                 add_assoc_zval_ex(rv, Z_STRVAL(key), Z_STRLEN(key), &val);
@@ -467,9 +512,12 @@ static void lowcardinality_to_zval(const ColumnRef &col, size_t index, zval *rv)
         break;
 
     case Type::Date: {
-        std::time_t t = static_cast<std::time_t>(item.get<uint16_t>()) * 86400;
+        int64_t seconds = static_cast<int64_t>(item.get<uint16_t>()) * 86400;
         struct tm tm_buf;
-        gmtime_r(&t, &tm_buf);
+        if (!utc_tm_from_unix(seconds, &tm_buf)) {
+            unrepresentable_datetime(rv);
+            break;
+        }
         char buf[16];
         int len = snprintf(buf, sizeof(buf), "%04d-%02d-%02d", tm_buf.tm_year + 1900,
                            tm_buf.tm_mon + 1, tm_buf.tm_mday);
@@ -477,9 +525,12 @@ static void lowcardinality_to_zval(const ColumnRef &col, size_t index, zval *rv)
         break;
     }
     case Type::Date32: {
-        std::time_t t = static_cast<std::time_t>(item.get<int32_t>()) * 86400;
+        int64_t seconds = static_cast<int64_t>(item.get<int32_t>()) * 86400;
         struct tm tm_buf;
-        gmtime_r(&t, &tm_buf);
+        if (!utc_tm_from_unix(seconds, &tm_buf)) {
+            unrepresentable_datetime(rv);
+            break;
+        }
         char buf[16];
         int len = snprintf(buf, sizeof(buf), "%04d-%02d-%02d", tm_buf.tm_year + 1900,
                            tm_buf.tm_mon + 1, tm_buf.tm_mday);

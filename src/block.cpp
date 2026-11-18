@@ -258,6 +258,9 @@ using RowList = std::vector<zend_array *>;
 template <typename Write> inline void fill_slots(const RowList &rows, uint32_t slot, Write write)
 {
     for (size_t r = 0; r < rows.size(); ++r) {
+        if (EG(exception)) {
+            return;
+        }
         write(r, &rows[r]->arData[slot].val);
     }
 }
@@ -360,6 +363,9 @@ void php_clickhouse_block_append_rows(const clickhouse::Block &block, zval *rows
     }
 
     for (size_t c = 0; c < block.GetColumnCount(); ++c) {
+        if (EG(exception)) {
+            return;
+        }
         if (row_template.OwnsSlot(c)) {
             fill_column(block[c], rows, row_template.Slot(c));
         }
