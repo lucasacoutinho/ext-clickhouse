@@ -16,6 +16,7 @@ static zend_object *php_clickhouse_client_create(zend_class_entry *ce)
         static_cast<php_clickhouse_client *>(zend_object_alloc(sizeof(php_clickhouse_client), ce));
 
     new (&intern->client) std::unique_ptr<clickhouse::Client>();
+    intern->query_in_flight = false;
 
     zend_object_std_init(&intern->std, ce);
     object_properties_init(&intern->std, ce);
@@ -30,6 +31,39 @@ static void php_clickhouse_client_free(zend_object *object)
     intern->client.~unique_ptr();
     zend_object_std_dtor(object);
 }
+
+/* Replacing or resetting the native client while Execute() is on the stack frees the
+ * object NextBlock() is still using. Refuse that instead of crashing. */
+static bool php_clickhouse_client_reject_reentry(const php_clickhouse_client *intern)
+{
+    if (!intern->query_in_flight) {
+        return false;
+    }
+
+    zend_throw_exception(clickhouse_ce_ValidationException,
+                         "Cannot re-enter Client while a query is in progress", 0);
+    return true;
+}
+
+class php_clickhouse_query_guard
+{
+  public:
+    explicit php_clickhouse_query_guard(php_clickhouse_client *intern) : intern_(intern)
+    {
+        intern_->query_in_flight = true;
+    }
+
+    ~php_clickhouse_query_guard()
+    {
+        intern_->query_in_flight = false;
+    }
+
+    php_clickhouse_query_guard(const php_clickhouse_query_guard &) = delete;
+    php_clickhouse_query_guard &operator=(const php_clickhouse_query_guard &) = delete;
+
+  private:
+    php_clickhouse_client *intern_;
+};
 
 ZEND_METHOD(ClickHouse_Driver_Client, __construct)
 {
@@ -47,6 +81,9 @@ ZEND_METHOD(ClickHouse_Driver_Client, __construct)
     }
 
     auto *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
+    if (php_clickhouse_client_reject_reentry(intern)) {
+        return;
+    }
 
     CLICKHOUSE_TRY
     intern->client = std::make_unique<clickhouse::Client>(*opts_intern->options);
@@ -129,6 +166,10 @@ ZEND_METHOD(ClickHouse_Driver_Client, execute)
         zend_throw_exception(clickhouse_ce_ClickHouseException, "Client not connected", 0);
         return;
     }
+    if (php_clickhouse_client_reject_reentry(intern)) {
+        return;
+    }
+    php_clickhouse_query_guard guard(intern);
 
     CLICKHOUSE_TRY
     auto q = build_query(query, params, settings, query_id);
@@ -156,12 +197,19 @@ ZEND_METHOD(ClickHouse_Driver_Client, select)
         zend_throw_exception(clickhouse_ce_ClickHouseException, "Client not connected", 0);
         return;
     }
+    if (php_clickhouse_client_reject_reentry(intern)) {
+        return;
+    }
+    php_clickhouse_query_guard guard(intern);
 
     array_init(return_value);
 
     CLICKHOUSE_TRY
     auto q = build_query(query, params, settings, query_id);
     q.OnData([&](const clickhouse::Block &block) {
+        if (EG(exception)) {
+            return;
+        }
         php_clickhouse_block_append_rows(block, return_value);
     });
     intern->client->Execute(q);
@@ -197,6 +245,10 @@ ZEND_METHOD(ClickHouse_Driver_Client, selectByBlock)
         zend_throw_exception(clickhouse_ce_ClickHouseException, "Client not connected", 0);
         return;
     }
+    if (php_clickhouse_client_reject_reentry(intern)) {
+        return;
+    }
+    php_clickhouse_query_guard guard(intern);
 
     CLICKHOUSE_TRY
     auto q = build_query(query, params, settings, query_id);
@@ -299,6 +351,10 @@ ZEND_METHOD(ClickHouse_Driver_Client, selectWithExternalData)
         zend_throw_exception(clickhouse_ce_ClickHouseException, "Client not connected", 0);
         return;
     }
+    if (php_clickhouse_client_reject_reentry(intern)) {
+        return;
+    }
+    php_clickhouse_query_guard guard(intern);
 
     array_init(return_value);
 
@@ -338,11 +394,19 @@ ZEND_METHOD(ClickHouse_Driver_Client, selectWithExternalData)
             return;
 
         for (size_t r = 0; r < rows; ++r) {
+            if (EG(exception)) {
+                return;
+            }
             zval row;
             array_init_size(&row, cols);
             for (size_t c = 0; c < cols; ++c) {
                 zval val;
                 php_clickhouse_column_to_zval(block[c], r, &val);
+                if (EG(exception)) {
+                    zval_ptr_dtor(&val);
+                    zval_ptr_dtor(&row);
+                    return;
+                }
                 add_assoc_zval_ex(&row, block.GetColumnName(c).c_str(),
                                   block.GetColumnName(c).size(), &val);
             }
@@ -371,12 +435,17 @@ ZEND_METHOD(ClickHouse_Driver_Client, insert)
         zend_throw_exception(clickhouse_ce_ClickHouseException, "Client not connected", 0);
         return;
     }
+    if (php_clickhouse_client_reject_reentry(intern)) {
+        return;
+    }
 
     auto *block_intern = php_clickhouse_block_from_zval(block_zv);
     if (!block_intern->block) {
         zend_throw_exception(clickhouse_ce_ValidationException, "Block not initialized", 0);
         return;
     }
+
+    php_clickhouse_query_guard guard(intern);
 
     CLICKHOUSE_TRY
     std::string tbl(ZSTR_VAL(table_name), ZSTR_LEN(table_name));
@@ -398,6 +467,10 @@ ZEND_METHOD(ClickHouse_Driver_Client, ping)
         zend_throw_exception(clickhouse_ce_ClickHouseException, "Client not connected", 0);
         return;
     }
+    if (php_clickhouse_client_reject_reentry(intern)) {
+        return;
+    }
+    php_clickhouse_query_guard guard(intern);
 
     CLICKHOUSE_TRY
     intern->client->Ping();
@@ -413,6 +486,9 @@ ZEND_METHOD(ClickHouse_Driver_Client, resetConnection)
         zend_throw_exception(clickhouse_ce_ClickHouseException, "Client not connected", 0);
         return;
     }
+    if (php_clickhouse_client_reject_reentry(intern)) {
+        return;
+    }
 
     CLICKHOUSE_TRY
     intern->client->ResetConnection();
@@ -426,6 +502,9 @@ ZEND_METHOD(ClickHouse_Driver_Client, resetConnectionEndpoint)
     auto *intern = Z_CLICKHOUSE_CLIENT_P(ZEND_THIS);
     if (!intern->client) {
         zend_throw_exception(clickhouse_ce_ClickHouseException, "Client not connected", 0);
+        return;
+    }
+    if (php_clickhouse_client_reject_reentry(intern)) {
         return;
     }
 

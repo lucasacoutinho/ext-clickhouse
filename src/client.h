@@ -9,6 +9,8 @@
 struct php_clickhouse_client
 {
     std::unique_ptr<clickhouse::Client> client;
+    /* True while Execute/Insert is on the stack. Callbacks must not replace or reset it. */
+    bool query_in_flight;
     zend_object std;
 };
 
