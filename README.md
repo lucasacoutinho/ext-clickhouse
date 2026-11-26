@@ -155,8 +155,8 @@ git submodule update --init --recursive
 Versioned and rolling images are published for each supported PHP release:
 
 ```bash
-docker pull ghcr.io/lucasacoutinho/ext-clickhouse:php8.5-v1.6.2
-docker pull ghcr.io/lucasacoutinho/ext-clickhouse:php8.5-latest
+docker pull ghcr.io/lucasacoutinho/ext-clickhouse:php8.6-v1.6.3
+docker pull ghcr.io/lucasacoutinho/ext-clickhouse:php8.6-latest
 ```
 
 Build the image locally with a different PHP version when needed:
