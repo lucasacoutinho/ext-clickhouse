@@ -16,7 +16,7 @@ static inline php_clickhouse_client_options *
 php_clickhouse_client_options_from_obj(zend_object *obj)
 {
     return reinterpret_cast<php_clickhouse_client_options *>(
-        reinterpret_cast<char *>(obj) - XtOffsetOf(php_clickhouse_client_options, std));
+        reinterpret_cast<char *>(obj) - offsetof(php_clickhouse_client_options, std));
 }
 
 #define Z_CLICKHOUSE_OPTIONS_P(zv) php_clickhouse_client_options_from_obj(Z_OBJ_P(zv))

@@ -359,7 +359,7 @@ void php_clickhouse_register_client_options(int module_number)
 
     memcpy(&clickhouse_client_options_handlers, zend_get_std_object_handlers(),
            sizeof(zend_object_handlers));
-    clickhouse_client_options_handlers.offset = XtOffsetOf(php_clickhouse_client_options, std);
+    clickhouse_client_options_handlers.offset = offsetof(php_clickhouse_client_options, std);
     clickhouse_client_options_handlers.free_obj = php_clickhouse_client_options_free;
     clickhouse_client_options_handlers.clone_obj = nullptr;
 }

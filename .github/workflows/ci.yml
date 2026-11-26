@@ -81,6 +81,8 @@ jobs:
             sanitizer: asan
           - php-version: '8.5'
             sanitizer: asan
+          - php-version: '8.6'
+            sanitizer: asan
 
     steps:
       - name: Checkout
@@ -121,7 +123,9 @@ jobs:
             "clickhouse-sanitizer:${{ matrix.php-version }}"
 
   time64-386:
-    runs-on: ubuntu-latest
+    # The Ubuntu 26.04 Docker profile blocks networking in i386 glibc containers.
+    # https://github.com/actions/runner-images/issues/14790
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -217,7 +221,8 @@ jobs:
       - name: Generate coverage report
         run: |
           lcov --capture --directory . --output-file coverage.raw.info
-          lcov --extract coverage.raw.info "$(pwd)/*.cpp" "$(pwd)/src/*" --output-file coverage.info
+          lcov --extract coverage.raw.info "$PWD/*.cpp" "$PWD/src/*" \
+            --exclude "$PWD/clickhouse-cpp/*" --output-file coverage.info
           genhtml coverage.info --output-directory coverage-html
 
       - name: Publish coverage summary
@@ -244,7 +249,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php-version: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
+        php-version: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5', '8.6']
+        phpts: [nts]
+        include:
+          - php-version: '8.6'
+            phpts: ts
 
     services:
       clickhouse:
@@ -276,6 +285,8 @@ jobs:
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
+        env:
+          phpts: ${{ matrix.phpts }}
         with:
           php-version: ${{ matrix.php-version }}
           tools: phpize
@@ -286,6 +297,10 @@ jobs:
           phpize
           ./configure --enable-clickhouse
           make -j$(nproc)
+
+      - name: Check standalone module loading
+        run: >-
+          php -n -d extension=modules/clickhouse.so -r 'exit(extension_loaded("clickhouse") ? 0 : 1);'
 
       - name: Run unit tests
         run: |

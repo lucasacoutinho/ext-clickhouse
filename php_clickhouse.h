@@ -1,6 +1,8 @@
 #ifndef PHP_CLICKHOUSE_H
 #define PHP_CLICKHOUSE_H
 
+#include <stddef.h>
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -14,7 +16,7 @@ extern "C" {
 #endif
 }
 
-#define PHP_CLICKHOUSE_VERSION "1.6.2"
+#define PHP_CLICKHOUSE_VERSION "1.6.3"
 #define PHP_CLICKHOUSE_EXTNAME "clickhouse"
 
 #ifndef ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE

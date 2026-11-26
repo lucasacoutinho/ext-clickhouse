@@ -13,7 +13,7 @@ struct php_clickhouse_column
 static inline php_clickhouse_column *php_clickhouse_column_from_obj(zend_object *obj)
 {
     return reinterpret_cast<php_clickhouse_column *>(reinterpret_cast<char *>(obj) -
-                                                     XtOffsetOf(php_clickhouse_column, std));
+                                                     offsetof(php_clickhouse_column, std));
 }
 
 static inline php_clickhouse_column *php_clickhouse_column_from_zval(zval *zv)

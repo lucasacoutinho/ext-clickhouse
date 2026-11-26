@@ -11,4 +11,6 @@
 void php_clickhouse_column_to_zval(const clickhouse::ColumnRef &col, size_t index,
                                    zval *return_value);
 
+void php_clickhouse_column_to_array(const clickhouse::ColumnRef &col, zval *return_value);
+
 #endif

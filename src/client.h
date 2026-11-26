@@ -15,7 +15,7 @@ struct php_clickhouse_client
 static inline php_clickhouse_client *php_clickhouse_client_from_obj(zend_object *obj)
 {
     return reinterpret_cast<php_clickhouse_client *>(reinterpret_cast<char *>(obj) -
-                                                     XtOffsetOf(php_clickhouse_client, std));
+                                                     offsetof(php_clickhouse_client, std));
 }
 
 #define Z_CLICKHOUSE_CLIENT_P(zv) php_clickhouse_client_from_obj(Z_OBJ_P(zv))

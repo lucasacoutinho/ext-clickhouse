@@ -3,6 +3,12 @@
 
 #include <cstdio>
 
+extern "C" {
+#if defined(ZTS) && defined(COMPILE_DL_CLICKHOUSE)
+ZEND_TSRMLS_CACHE_DEFINE()
+#endif
+}
+
 static PHP_MINIT_FUNCTION(clickhouse)
 {
     php_clickhouse_register_exceptions(module_number);
@@ -19,6 +25,14 @@ static PHP_MINIT_FUNCTION(clickhouse)
 
 static PHP_MSHUTDOWN_FUNCTION(clickhouse)
 {
+    return SUCCESS;
+}
+
+static PHP_RINIT_FUNCTION(clickhouse)
+{
+#if defined(ZTS) && defined(COMPILE_DL_CLICKHOUSE)
+    ZEND_TSRMLS_CACHE_UPDATE();
+#endif
     return SUCCESS;
 }
 
@@ -46,7 +60,7 @@ zend_module_entry clickhouse_module_entry = {STANDARD_MODULE_HEADER,
                                              clickhouse_functions,
                                              PHP_MINIT(clickhouse),
                                              PHP_MSHUTDOWN(clickhouse),
-                                             NULL, /* RINIT */
+                                             PHP_RINIT(clickhouse),
                                              NULL, /* RSHUTDOWN */
                                              PHP_MINFO(clickhouse),
                                              PHP_CLICKHOUSE_VERSION,
