@@ -81,6 +81,8 @@ jobs:
             sanitizer: asan
           - php-version: '8.5'
             sanitizer: asan
+          - php-version: '8.6'
+            sanitizer: asan
 
     steps:
       - name: Checkout
@@ -244,7 +246,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php-version: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
+        php-version: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5', '8.6']
+        phpts: [nts]
+        include:
+          - php-version: '8.6'
+            phpts: ts
 
     services:
       clickhouse:
@@ -276,6 +282,8 @@ jobs:
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
+        env:
+          phpts: ${{ matrix.phpts }}
         with:
           php-version: ${{ matrix.php-version }}
           tools: phpize
@@ -286,6 +294,10 @@ jobs:
           phpize
           ./configure --enable-clickhouse
           make -j$(nproc)
+
+      - name: Check standalone module loading
+        run: >-
+          php -n -d extension=modules/clickhouse.so -r 'exit(extension_loaded("clickhouse") ? 0 : 1);'
 
       - name: Run unit tests
         run: |

@@ -145,14 +145,7 @@ ZEND_METHOD(ClickHouse_Driver_Column, toArray)
         return;
     }
 
-    size_t n = intern->column->Size();
-    array_init_size(return_value, n);
-
-    for (size_t i = 0; i < n; ++i) {
-        zval val;
-        php_clickhouse_column_to_zval(intern->column, i, &val);
-        add_next_index_zval(return_value, &val);
-    }
+    php_clickhouse_column_to_array(intern->column, return_value);
 }
 
 void php_clickhouse_create_column_from_ref(zval *return_value, clickhouse::ColumnRef col_ref)
@@ -190,7 +183,7 @@ void php_clickhouse_register_column(int module_number)
 
     memcpy(&clickhouse_column_handlers, zend_get_std_object_handlers(),
            sizeof(zend_object_handlers));
-    clickhouse_column_handlers.offset = XtOffsetOf(php_clickhouse_column, std);
+    clickhouse_column_handlers.offset = offsetof(php_clickhouse_column, std);
     clickhouse_column_handlers.free_obj = php_clickhouse_column_free;
     clickhouse_column_handlers.clone_obj = nullptr;
 }

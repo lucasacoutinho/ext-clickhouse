@@ -7,7 +7,7 @@
   <p>
     <a href="https://github.com/lucasacoutinho/ext-clickhouse/actions/workflows/ci.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/lucasacoutinho/ext-clickhouse/ci.yml?branch=main&style=for-the-badge&labelColor=000000"></a>
     <a href="https://packagist.org/packages/lucasacoutinho/ext-clickhouse"><img alt="Packagist version" src="https://img.shields.io/packagist/v/lucasacoutinho/ext-clickhouse?style=for-the-badge&labelColor=000000"></a>
-    <a href="#requirements"><img alt="PHP 7.4 through 8.5" src="https://img.shields.io/badge/PHP-7.4%20to%208.5-777BB4?style=for-the-badge&logo=php&logoColor=white&labelColor=000000"></a>
+    <a href="#requirements"><img alt="PHP 7.4 through 8.6" src="https://img.shields.io/badge/PHP-7.4%20to%208.6-777BB4?style=for-the-badge&logo=php&logoColor=white&labelColor=000000"></a>
     <a href="https://github.com/lucasacoutinho/ext-clickhouse/blob/main/LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/lucasacoutinho/ext-clickhouse?style=for-the-badge&labelColor=000000"></a>
   </p>
 </div>
@@ -53,7 +53,7 @@ block-by-block result streaming without an HTTP or cURL transport.
 
 | Component | Supported version |
 | --- | --- |
-| PHP | 7.4 through 8.5 |
+| PHP | 7.4 through 8.6 |
 | Compiler for source builds | GCC 8+, Clang 7+, or another C++17 compiler |
 | ClickHouse C++ client | Bundled with the extension |
 
@@ -162,7 +162,7 @@ docker pull ghcr.io/lucasacoutinho/ext-clickhouse:php8.5-latest
 Build the image locally with a different PHP version when needed:
 
 ```bash
-docker build --build-arg PHP_VERSION=8.5 -t ext-clickhouse .
+docker build --build-arg PHP_VERSION=8.6 -t ext-clickhouse .
 ```
 
 ## Bundled clickhouse-cpp
@@ -171,14 +171,15 @@ The repository pins `clickhouse-cpp` as a git submodule and compiles it into
 `clickhouse.so`. Users do not install or link a separate system copy.
 `phpinfo()` reports the embedded client version.
 
-The v1.6.2 release reports `clickhouse-cpp` v2.6.2 and pins upstream commit
-`cdc6dfc2980826560bfdbd06e937c7a01a495209`. This post-tag snapshot preserves
-DateTime timezone metadata, validates array element types and compressed block
-sizes, flushes the handshake addendum before the first query, and reports
-premature socket EOF as a protocol error. It also rejects unbalanced and
-overly nested type names, reads the ProfileInfo flags as bytes, zeroes
-ServerInfo fields missing from a server Hello, and names the CA file or
-directory when loading it fails.
+The submodule pins upstream commit `14782abaec50af8a81e6d4f47b434fac0fc77948`.
+The library reports v2.6.2. Since the extension's v1.6.2 release (`cdc6dfc`),
+upstream added validation of FixedString widths, including under LowCardinality.
+This post-tag snapshot preserves DateTime timezone metadata, validates array
+element types and compressed block sizes, flushes the handshake addendum
+before the first query, and reports premature socket EOF as a protocol error.
+It also rejects unbalanced and overly nested type names, reads the ProfileInfo
+flags as bytes, zeroes ServerInfo fields missing from a server Hello, and names
+the CA file or directory when loading it fails.
 
 The build explicitly preserves native Bool values, Abseil-backed wide integers,
 and the optional C++ endpoint API. Rebuild `ext-clickhouse-pdo` against this

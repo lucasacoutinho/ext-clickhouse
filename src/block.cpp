@@ -415,7 +415,7 @@ void php_clickhouse_register_block(int module_number)
 
     memcpy(&clickhouse_block_handlers, zend_get_std_object_handlers(),
            sizeof(zend_object_handlers));
-    clickhouse_block_handlers.offset = XtOffsetOf(php_clickhouse_block, std);
+    clickhouse_block_handlers.offset = offsetof(php_clickhouse_block, std);
     clickhouse_block_handlers.free_obj = php_clickhouse_block_free;
     clickhouse_block_handlers.clone_obj = nullptr;
 }

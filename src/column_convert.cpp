@@ -27,7 +27,7 @@
 #include <cstring>
 #include <cinttypes>
 #include <limits>
-#include <sstream>
+#include <type_traits>
 #include <string>
 #include <tuple>
 #include <arpa/inet.h> /* ntohl, inet_ntop */
@@ -205,18 +205,95 @@ static void nullable_to_zval(const ColumnRef &col, size_t index, zval *rv)
     }
 }
 
+template <typename T>
+static void fill_numeric_array(const ColumnRef &col, size_t offset, size_t count, zval *rv)
+{
+    const auto &data = static_cast<ColumnVector<T> *>(col.get())->GetWritableData();
+    HashTable *result = Z_ARRVAL_P(rv);
+    zend_hash_real_init_packed(result);
+    ZEND_HASH_FILL_PACKED(result)
+    {
+        for (size_t i = offset; i < offset + count; ++i) {
+            if constexpr (std::is_same_v<T, uint64_t>) {
+                zval value;
+                uint64_value_to_zval(data[i], &value);
+                ZEND_HASH_FILL_SET(&value);
+            } else if constexpr (std::is_floating_point_v<T>) {
+                ZEND_HASH_FILL_SET_DOUBLE(data[i]);
+            } else {
+                ZEND_HASH_FILL_SET_LONG(static_cast<zend_long>(data[i]));
+            }
+            ZEND_HASH_FILL_NEXT();
+        }
+    }
+    ZEND_HASH_FILL_END();
+}
+
+static void column_range_to_array(const ColumnRef &col, size_t offset, size_t count, zval *rv)
+{
+    if (UNEXPECTED(count > HT_MAX_SIZE)) {
+        zend_throw_exception(clickhouse_ce_ValidationException, "Column exceeds PHP array size", 0);
+        ZVAL_NULL(rv);
+        return;
+    }
+    array_init_size(rv, static_cast<uint32_t>(count));
+    if (!count) {
+        return;
+    }
+
+    switch (col->GetType().GetCode()) {
+    case Type::Int8:
+        return fill_numeric_array<int8_t>(col, offset, count, rv);
+    case Type::Int16:
+        return fill_numeric_array<int16_t>(col, offset, count, rv);
+    case Type::Int32:
+        return fill_numeric_array<int32_t>(col, offset, count, rv);
+    case Type::Int64:
+        return fill_numeric_array<int64_t>(col, offset, count, rv);
+    case Type::UInt8:
+        return fill_numeric_array<uint8_t>(col, offset, count, rv);
+    case Type::UInt16:
+        return fill_numeric_array<uint16_t>(col, offset, count, rv);
+    case Type::UInt32:
+        return fill_numeric_array<uint32_t>(col, offset, count, rv);
+    case Type::UInt64:
+        return fill_numeric_array<uint64_t>(col, offset, count, rv);
+    case Type::Float32:
+        return fill_numeric_array<float>(col, offset, count, rv);
+    case Type::Float64:
+        return fill_numeric_array<double>(col, offset, count, rv);
+    default:
+        for (size_t i = offset; i < offset + count; ++i) {
+            zval value;
+            php_clickhouse_column_to_zval(col, i, &value);
+            add_next_index_zval(rv, &value);
+            if (UNEXPECTED(EG(exception))) {
+                return;
+            }
+        }
+    }
+}
+
+void php_clickhouse_column_to_array(const ColumnRef &col, zval *rv)
+{
+    column_range_to_array(col, 0, col->Size(), rv);
+}
+
 static void array_to_zval(const ColumnRef &col, size_t index, zval *rv)
 {
-    auto typed = col->As<ColumnArray>();
-    auto slice = typed->GetAsColumn(index);
-    size_t n = slice->Size();
-
-    array_init_size(rv, n);
-    for (size_t i = 0; i < n; ++i) {
-        zval elem;
-        php_clickhouse_column_to_zval(slice, i, &elem);
-        add_next_index_zval(rv, &elem);
+    auto *array = static_cast<ColumnArray *>(col.get());
+    const auto &offsets = array->GetOffsets()->GetWritableData();
+    const auto data = array->GetData();
+    const uint64_t start = index == 0 ? 0 : offsets.at(index - 1);
+    const uint64_t end = offsets.at(index);
+    if (UNEXPECTED(end < start || end > data->Size())) {
+        zend_throw_exception(clickhouse_ce_ValidationException, "Invalid ClickHouse array offsets",
+                             0);
+        ZVAL_NULL(rv);
+        return;
     }
+
+    column_range_to_array(data, static_cast<size_t>(start), static_cast<size_t>(end - start), rv);
 }
 
 static void tuple_to_zval(const ColumnRef &col, size_t index, zval *rv)
@@ -320,54 +397,52 @@ static void ipv6_to_zval(const ColumnRef &col, size_t index, zval *rv)
 
 static void decimal_to_zval(const ColumnRef &col, size_t index, zval *rv)
 {
-    /* Return as string to preserve precision.
-     * ColumnDecimal::At() returns the raw Int128 scaled integer.
-     * We format it as "integer_part.fractional_part" using the column's scale. */
-    auto typed = col->As<ColumnDecimal>();
-    if (!typed) {
-        ZVAL_NULL(rv);
-        return;
-    }
-
-    decimal_value_to_zval(typed->At(index), typed->GetScale(), rv);
+    const auto *decimal = typed_column<ColumnDecimal>(col);
+    const auto &type = static_cast<const DecimalType &>(col->GetType());
+    decimal_value_to_zval(decimal->At(index), type.GetScale(), rv);
 }
 
 static void decimal_value_to_zval(Int128 raw, size_t scale, zval *rv)
 {
-    if (scale == 0) {
-        std::ostringstream oss;
-        oss << raw;
-        std::string str = oss.str();
-        ZVAL_STRINGL(rv, str.c_str(), str.size());
+    if (scale <= 18 && raw >= INT64_MIN && raw <= INT64_MAX) {
+        const int64_t value = static_cast<int64_t>(raw);
+        uint64_t magnitude = static_cast<uint64_t>(value);
+        if (value < 0) {
+            magnitude = 0 - magnitude;
+        }
+
+        // 19 digits, a leading zero for a fraction, a decimal point and a sign.
+        char buffer[22];
+        const char *end = buffer + sizeof(buffer);
+        char *pos = buffer + sizeof(buffer);
+        if (scale) {
+            for (size_t i = 0; i < scale; ++i) {
+                *--pos = static_cast<char>('0' + magnitude % 10);
+                magnitude /= 10;
+            }
+            *--pos = '.';
+        }
+        do {
+            *--pos = static_cast<char>('0' + magnitude % 10);
+            magnitude /= 10;
+        } while (magnitude);
+        if (value < 0) {
+            *--pos = '-';
+        }
+        ZVAL_STRINGL(rv, pos, end - pos);
         return;
     }
 
-    Int128 divisor = 1;
-    for (size_t i = 0; i < scale; ++i)
-        divisor *= 10;
-
-    bool negative = (raw < 0);
-    if (negative)
-        raw = -raw;
-
-    Int128 integer_part = raw / divisor;
-    Int128 frac_part = raw % divisor;
-
-    std::ostringstream oss;
-    if (negative)
-        oss << '-';
-    oss << integer_part << '.';
-
-    /* Pad fractional part with leading zeros to match scale */
-    std::ostringstream foss;
-    foss << frac_part;
-    std::string frac_str = foss.str();
-    for (size_t i = frac_str.size(); i < scale; ++i)
-        oss << '0';
-    oss << frac_str;
-
-    std::string str = oss.str();
-    ZVAL_STRINGL(rv, str.c_str(), str.size());
+    std::string digits = Bignum::Int128ToString(raw);
+    if (scale != 0) {
+        const size_t sign = digits.front() == '-' ? 1 : 0;
+        const size_t digit_count = digits.size() - sign;
+        if (digit_count <= scale) {
+            digits.insert(sign, scale - digit_count + 1, '0');
+        }
+        digits.insert(digits.size() - scale, 1, '.');
+    }
+    ZVAL_STRINGL(rv, digits.data(), digits.size());
 }
 
 static Int128 decimal_item_to_int128(const ItemView &item)
@@ -386,23 +461,14 @@ static Int128 decimal_item_to_int128(const ItemView &item)
 
 static void int128_to_zval(const ColumnRef &col, size_t index, zval *rv)
 {
-    auto typed = col->As<ColumnVector<absl::int128>>();
-    auto val = typed->At(index);
-    /* absl::int128 supports operator<< for proper decimal string output */
-    std::ostringstream oss;
-    oss << val;
-    std::string str = oss.str();
-    ZVAL_STRINGL(rv, str.c_str(), str.size());
+    const auto digits = Bignum::Int128ToString(typed_column<ColumnInt128>(col)->At(index));
+    ZVAL_STRINGL(rv, digits.data(), digits.size());
 }
 
 static void uint128_to_zval(const ColumnRef &col, size_t index, zval *rv)
 {
-    auto typed = col->As<ColumnVector<absl::uint128>>();
-    auto val = typed->At(index);
-    std::ostringstream oss;
-    oss << val;
-    std::string str = oss.str();
-    ZVAL_STRINGL(rv, str.c_str(), str.size());
+    const auto digits = Bignum::UInt128ToString(typed_column<ColumnUInt128>(col)->At(index));
+    ZVAL_STRINGL(rv, digits.data(), digits.size());
 }
 
 static void lowcardinality_to_zval(const ColumnRef &col, size_t index, zval *rv)
@@ -557,16 +623,12 @@ static void lowcardinality_to_zval(const ColumnRef &col, size_t index, zval *rv)
         break;
 
     case Type::Int128: {
-        std::ostringstream oss;
-        oss << item.get<Int128>();
-        std::string str = oss.str();
+        const std::string str = Bignum::Int128ToString(item.get<Int128>());
         ZVAL_STRINGL(rv, str.c_str(), str.size());
         break;
     }
     case Type::UInt128: {
-        std::ostringstream oss;
-        oss << item.get<UInt128>();
-        std::string str = oss.str();
+        const std::string str = Bignum::UInt128ToString(item.get<UInt128>());
         ZVAL_STRINGL(rv, str.c_str(), str.size());
         break;
     }
